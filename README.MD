@@ -150,18 +150,7 @@ You will know it's active because your shell prompt will be prefixed with `(venv
 
 The project requires several Python libraries. These are listed in a `requirements.txt` file.
 
-1.  Create a `requirements.txt` file in the root of your project (`forex-prediction-bot/requirements.txt`) with the following content:
-
-    **requirements.txt:**
-    ```
-    python-telegram-bot
-    requests
-    numpy
-    matplotlib
-    python-dotenv
-    ```
-
-2.  Now, install all the required packages using pip:
+Install all the required packages using pip:
 
     ```bash
     pip install -r requirements.txt
