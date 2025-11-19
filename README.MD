@@ -129,7 +129,7 @@ This guide will walk you through setting up and running the bot on a typical Lin
 First, clone your project repository from your Git provider to your server.
 
 ```bash
-git clone <your-repository-url>
+git clone https://github.com/maxy618/forex-prediction-bot
 cd forex-prediction-bot
 ```
 
