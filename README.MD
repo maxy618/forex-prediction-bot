@@ -152,9 +152,9 @@ The project requires several Python libraries. These are listed in a `requiremen
 
 Install all the required packages using pip:
 
-    ```bash
-    pip install -r requirements.txt
-    ```
+```
+pip install -r requirements.txt
+```
 
 ### Step 4: Configure File Paths
 

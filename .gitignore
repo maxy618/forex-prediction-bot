@@ -28,7 +28,7 @@ ENV/
 *.swo
 .DS_Store
 Thumbs.db
-datasets/
-models/
+.csv
+.pkl
 temp/
 .env
