@@ -114,22 +114,6 @@ Assume state `('+' , '+')` has counts `{ '+': 4, '-': 1 }`.
 
 So `k=0.2` gently shifts probabilities towards uniformity without overruling the data.
 
-**Edge cases**:
-
-* If a state has only one observed next value (e.g. `{'+': 3}`) and `k` is small, the smoothed probabilities remain close to `{'+': 1.0, '-': small}`.
-* If `v` is taken as `len(counter)` (observed distinct next tokens) then transitions to tokens that were never seen are still impossible unless you explicitly enumerate the full token set (e.g. `['+', '-', '0']`). For binary tokens `+/-` this is not an issue, but for models with more possible tokens you may want to force `v` to be the size of the global alphabet.
-
-**Alternative smoothing approaches**:
-
-* **Backoff models**: if the exact `order` state is missing, back off to a lower-order state count. That generally improves coverage (useful for higher order models).
-* **Kneser-Ney / Good-Turing**: more advanced and powerful for language modeling — overkill for binary signs but conceptually interesting.
-
-**Implementation hints**:
-
-* Consider passing an explicit `alphabet` to `counts_to_probabilities` so `v` can be constant across states (recommended when you expand token set).
-* Normalize numerically stable: compute `p = (m + k) / (n + k * v)` but guard `n + k * v != 0`.
-* When sampling across probabilities, ensure the sum is ~1.0; re-normalize floating point results to avoid cumulative rounding errors.
-
 ### Lagged linear regression — maths and numerics
 
 The regression model predicts the next `diff` using a linear combination of the previous `n_lags` diffs. Formally:
