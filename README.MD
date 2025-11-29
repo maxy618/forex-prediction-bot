@@ -41,7 +41,7 @@ This project is a Telegram bot that provides currency exchange rate forecasts. I
 forex-prediction-bot/
 ├── src/
 │   ├── main.py         # Main bot logic, handlers, and core functions.
-│   └── .env            # Environment variables (e.g., your secret Telegram token).
+│   └── .env            # Environment variables (e.g., telegram token).
 ├── datasets/           # Historical data (CSV files) used for training the models.
 │   ├── EURRUB.csv
 │   ├── EURUSD.csv
@@ -51,7 +51,7 @@ forex-prediction-bot/
 │   ├── regression_EURUSD_10.pkl
 │   └── ...             # Other model files.
 ├── assets/
-│   └── logo.png        # Optional logo for the bot's welcome message.
+│   └── logo.png        # Logo for the bot's welcome message.
 └── temp/               # A temporary directory where generated graphs are stored before being sent.
 ```
 
@@ -75,7 +75,7 @@ Date,Price,Sign,Difference
 
 ## Configuration
 
-The bot's behavior can be configured through environment variables and settings within the `main.py` script.
+The bot's behavior can be configured through settings within the `main.py` script.
 
 ### Environment Variables (.env)
 
