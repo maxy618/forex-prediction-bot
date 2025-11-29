@@ -103,7 +103,6 @@ This is a generalization of Laplace (add-1) smoothing. The code defines `k = MOD
 
 * `k = 1.0` — classic Laplace smoothing. Aggressive for small `n` (pulls distribution towards uniform).
 * `0 < k < 1` — milder smoothing (the default `0.2` in this repo), allowing observed counts to dominate while still protecting unseen events.
-* `k << 1` — almost no smoothing; risky when data is scarce.
 
 **Practical guidance and examples**:
 
