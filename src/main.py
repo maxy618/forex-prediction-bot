@@ -36,7 +36,7 @@ MODELS_SETTINGS = {
     }
 }
 
-TELEGRAM_TOKEN = load_dotenv("TELEGRAM_TOKEN")
+TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
 
 DATASETS_PATH = "../datasets/"
 MODELS_PATH = "../models/"
