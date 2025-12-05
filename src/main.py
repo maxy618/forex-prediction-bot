@@ -3,6 +3,7 @@ import random
 import csv
 import pickle
 import time
+import json
 
 from collections import defaultdict, Counter
 from datetime import date, timedelta
@@ -11,18 +12,21 @@ import numpy as np
 import requests
 from requests.adapters import HTTPAdapter, Retry
 
+from dotenv import load_dotenv
+load_dotenv()
+
 from matplotlib import use
 use("Agg")
 import matplotlib.pyplot as plt
 
 from telegram import Bot, InlineKeyboardButton, InlineKeyboardMarkup, InputMediaPhoto
-from telegram.ext import Updater, CommandHandler, CallbackQueryHandler
+from telegram.ext import Updater, CommandHandler, CallbackQueryHandler, MessageHandler, Filters
 from telegram.utils.request import Request
 
-from dotenv import load_dotenv
-load_dotenv()
 
-
+# ==============================
+# CONFIG
+# ==============================
 MODELS_SETTINGS = {
     "REBUILD": True,
     "reg": {
@@ -57,6 +61,19 @@ retry_strategy = Retry(
 )
 SESSION.mount("https://", HTTPAdapter(max_retries=retry_strategy))
 SESSION.headers.update({"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) cbr-client/1.0"})
+
+GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
+GEMINI_MODEL = "gemini-2.5-flash"
+GEMINI_URL = f"https://generativelanguage.googleapis.com/v1beta/models/{GEMINI_MODEL}:generateContent"
+
+PROMPT_TEMPLATE = (
+    "Ты — краткий практичный финансовый ассистент-анализатор. "
+    "Внимание: у тебя нет реального изображения графика, но тебе даётся текстовая сводка с последними ценами и прогнозными значениями — "
+    "проанализируй их как будто видел график (внимай трендам, диапазонам, направлению и волатильности).\n\n"
+    "Требуется ответить на пользовательский вопрос по графику. Всегда старайся ответить конкретно, однозначно. Если вопрос сильно отклоняется от темы, можешь не отвечать "
+    "Давай ответ коротко, по делу (примерно 4 предложения) на русском. Укажи, если нужно, количественную оценку (проценты/абсолютные изменения).\n\n"
+    "Данные для анализа (ниже):\n"
+)
 
 
 # ==============================
@@ -415,9 +432,9 @@ def plot_sequence(old_prices, new_prices, filename):
 
 
 # ==============================
-# TELEGRAM (упрощённый)
+# TELEGRAM
 # ==============================
-CHAT_STATE = {}  # chat_id -> {"msg_id": int, "has_logo": bool}
+CHAT_STATE = {}  # chat_id -> {"msg_id": int, "has_logo": bool, "last_media": str, "first":..., "awaiting_question": bool}
 
 
 def _temp_file(user_id):
@@ -456,12 +473,16 @@ def _make_rows(pairs):
     return InlineKeyboardMarkup(keyboard)
 
 
-def _save_chat_state(chat_id, message_id, has_logo):
-    CHAT_STATE[chat_id] = {"msg_id": int(message_id), "has_logo": bool(has_logo)}
+def _save_chat_state(chat_id, message_id, has_logo, **kwargs):
+    state = CHAT_STATE.get(chat_id, {})
+    state.update({"msg_id": int(message_id), "has_logo": bool(has_logo)})
+    for k, v in kwargs.items():
+        state[k] = v
+    CHAT_STATE[chat_id] = state
 
 
 def _get_chat_state(chat_id):
-    return CHAT_STATE.get(chat_id, {"msg_id": None, "has_logo": False})
+    return CHAT_STATE.get(chat_id, {"msg_id": None, "has_logo": False, "awaiting_question": False})
 
 
 def start_handler(update, context):
@@ -547,6 +568,50 @@ def _edit_or_send_media(bot, chat_id, message_id, caption=None, media_path=None,
                 pass
             _save_chat_state(chat_id, new_msg.message_id, False)
             return
+
+
+def call_gemini_advice(question_text: str, summary_text: str):
+    prompt = PROMPT_TEMPLATE + summary_text + "\n\nUser question:\n" + question_text + "\n\nОтвет:"
+    payload = {
+        "contents": [
+            {"parts": [{"text": prompt}]}
+        ],
+        # "temperature": 0.2,
+        # "max_output_tokens": 256,
+    }
+    headers = {"Content-Type": "application/json", "x-goog-api-key": GEMINI_API_KEY}
+    try:
+        r = SESSION.post(GEMINI_URL, headers=headers, data=json.dumps(payload), timeout=30)
+        r.raise_for_status()
+    except Exception:
+        return None
+
+    try:
+        j = r.json()
+    except Exception:
+        return None
+
+    # try to extract text
+    try:
+        return j["candidates"][0]["content"]["parts"][0]["text"].strip()
+    except Exception:
+        # fallback walk
+        def walk(o):
+            if isinstance(o, str):
+                return o
+            if isinstance(o, dict):
+                for v in o.values():
+                    found = walk(v)
+                    if found:
+                        return found
+            if isinstance(o, list):
+                for v in o:
+                    found = walk(v)
+                    if found:
+                        return found
+            return None
+        txt = walk(j)
+        return txt.strip() if txt else None
 
 
 def _perform_prediction_and_edit(bot, chat_id, message_id, user_id, first, second, days):
@@ -644,7 +709,26 @@ def _perform_prediction_and_edit(bot, chat_id, message_id, user_id, first, secon
     verb = "стоит" if delta > 0 else "не стоит"
     advice = f"Скорее всего {verb} покупать — цена {sign_text} на {abs(delta):.6f}"
 
-    _edit_or_send_media(bot, chat_id, message_id, caption=advice, media_path=out_path, reply_markup=_make_rows([[("Назад", "back:first")]]))
+    ask_cb = f"ask:{first}:{second}:{days}"
+    kb = _make_rows([[("Назад", "back:first"), ("Задать вопрос", ask_cb)]])
+    _edit_or_send_media(bot, chat_id, message_id, caption=advice, media_path=out_path, reply_markup=kb)
+
+    # === CHANGED: save forecast into chat state so question handler can use it ===
+    state = _get_chat_state(chat_id)
+    state.update({
+        "last_media": out_path,
+        "first": first,
+        "second": second,
+        "days": days,
+        "awaiting_question": False,
+        "forecasted_prices": [float(x) for x in new_prices],
+        "forecasted_diffs": [float(x) for x in adjusted],
+        "forecast_delta": float(delta),
+        "advice_text": advice,
+        "forecast_ts": int(time.time())
+    })
+    CHAT_STATE[chat_id] = state
+    # === /CHANGED ===
 
     try:
         os.remove(out_path)
@@ -689,6 +773,40 @@ def cb_query(update, context):
         _perform_prediction_and_edit(context.bot, chat_id, message_id, user_id, first, second, days)
         return
 
+    if cmd == "ask" and len(parts) == 4:
+        _, first, second, days_str = parts
+        state = _get_chat_state(chat_id)
+        state.update({"awaiting_question": True})
+        CHAT_STATE[chat_id] = state
+        try:
+            context.bot.edit_message_caption(chat_id=chat_id, message_id=message_id,
+                                             caption="Отправьте вопрос по графику", reply_markup=_make_rows([[("Отмена", f"cancel_ask")]]))
+        except Exception:
+            try:
+                context.bot.send_message(chat_id=chat_id, text="Отправьте вопрос по графику", reply_markup=_make_rows([[("Отмена", f"cancel_ask")]]))
+            except Exception:
+                pass
+        return
+
+    if cmd == "cancel_ask":
+        state = _get_chat_state(chat_id)
+        state["awaiting_question"] = False
+        CHAT_STATE[chat_id] = state
+        first = state.get("first")
+        second = state.get("second")
+        if first and second:
+            kb = _make_rows([[("Назад", "back:first"), ("Задать вопрос", f"ask:{first}:{second}:{state.get('days',1)}")]])
+            try:
+                context.bot.edit_message_caption(chat_id=chat_id, message_id=message_id, caption="Выберите:", reply_markup=kb)
+            except Exception:
+                pass
+        else:
+            try:
+                context.bot.edit_message_caption(chat_id=chat_id, message_id=message_id, caption="Выберите первую валюту", reply_markup=_kb_first())
+            except Exception:
+                pass
+        return
+
     if cmd == "back":
         if len(parts) >= 2 and parts[1] == "first":
             _replace_with_logo(context.bot, chat_id, message_id, caption="Выберите первую валюту", reply_markup=_kb_first())
@@ -702,6 +820,93 @@ def cb_query(update, context):
     query.answer(text="Неизвестная команда", show_alert=False)
 
 
+def question_message_handler(update, context):
+    msg = update.message
+    chat_id = msg.chat.id
+    user_msg_id = msg.message_id
+    text = (msg.text or "").strip()
+    if not text:
+        return
+
+    state = _get_chat_state(chat_id)
+    if not state.get("awaiting_question"):
+        return
+
+    state["awaiting_question"] = False
+    CHAT_STATE[chat_id] = state
+
+    try:
+        context.bot.delete_message(chat_id=chat_id, message_id=user_msg_id)
+    except Exception:
+        pass
+
+    bot_msg_id = state.get("msg_id")
+    try:
+        context.bot.edit_message_caption(chat_id=chat_id, message_id=bot_msg_id, caption="Ожидайте ответ ассистента...", reply_markup=None)
+    except Exception:
+        try:
+            context.bot.send_message(chat_id=chat_id, text="Ожидайте ответ ассистента...")
+        except Exception:
+            pass
+
+    try:
+        first = state.get("first")
+        second = state.get("second")
+        days = int(state.get("days", 1))
+        try:
+            all_rates = fetch_sequences_all_pairs(CURRENCIES, days=max(MODELS_SETTINGS["reg"]["max_n"], MODELS_SETTINGS["markov"]["max_n"]))
+            pair_key = f"{second}_per_{first}"
+            dates = sorted(all_rates.keys())
+            prices = [float(all_rates[d][pair_key]) for d in dates]
+        except Exception:
+            prices = []
+        last_prices_text = ", ".join(f"{p:.6f}" for p in (prices[-3:] if prices else []))
+
+        # === CHANGED: include saved forecast in summary_text if present ===
+        forecasted_prices = state.get("forecasted_prices")
+        forecast_delta = state.get("forecast_delta")
+        advice_text = state.get("advice_text")
+
+        if forecasted_prices:
+            forecast_text = ", ".join(f"{p:.6f}" for p in forecasted_prices)
+            summary_text = (
+                f"Pair: {first}/{second}\n"
+                f"Latest prices: {last_prices_text}\n"
+                f"Forecast days: {days}\n"
+                f"Forecasted prices: {forecast_text}\n"
+                f"Forecast delta (last vs current): {forecast_delta:.6f}\n"
+                f"Advice (bot): {advice_text}\n"
+            )
+        else:
+            summary_text = f"Pair: {first}/{second}\nLatest prices: {last_prices_text}\nForecast days: {days}\n"
+        # === /CHANGED ===
+
+    except Exception:
+        summary_text = "Chart data: unavailable.\n"
+
+    gemini_resp = call_gemini_advice(text, summary_text)
+
+    final_caption = None
+    if gemini_resp:
+        final_caption = gemini_resp
+    else:
+        final_caption = "Ассистент не смог предоставить ответ (ошибка подключения к модели)."
+
+    first = state.get("first")
+    second = state.get("second")
+    kb = None
+    if first and second:
+        kb = _make_rows([[("Назад", "back:first"), ("Задать вопрос", f"ask:{first}:{second}:{state.get('days',1)}")]])
+    try:
+        bot_msg_id = state.get("msg_id")
+        context.bot.edit_message_caption(chat_id=chat_id, message_id=bot_msg_id, caption=final_caption, reply_markup=kb)
+    except Exception:
+        try:
+            context.bot.send_message(chat_id=chat_id, text=final_caption, reply_markup=kb)
+        except Exception:
+            pass
+
+
 def telegram_main():
     req = Request(connect_timeout=30, read_timeout=30)
     bot = Bot(token=TELEGRAM_TOKEN, request=req)
@@ -709,6 +914,7 @@ def telegram_main():
     dp = updater.dispatcher
     dp.add_handler(CommandHandler("start", start_handler))
     dp.add_handler(CallbackQueryHandler(cb_query))
+    dp.add_handler(MessageHandler(Filters.text & (~Filters.command), question_message_handler))
     updater.start_polling()
     updater.idle()
 
