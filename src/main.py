@@ -44,14 +44,14 @@ MODELS_SETTINGS = {
 
 user_interface = {
     "captions": {
-        "press_to_predict": "Нажми чтобы сделать прогноз",
-        "choose_first": "Выберите первую валюту",
-        "choose_second": "Выберите вторую валюту",
+        "warning": "Прогноз — это лишь вероятность, а не гарантия. Используй результат как подсказку, а не как финансовый совет",
+        "choose_first": "Выбери первую валюту",
+        "choose_second": "Выбери вторую валюту",
         "choose_days": "Выберите количество дней (1-9)",
         "predicting": "Выполняется прогноз, секунду...",
         "ask_question": "Отправьте вопрос по графику",
         "awaiting_assistant": "Ожидайте ответ ассистента...",
-        "unexpected_error": "❌ произошла непредвиденная ошибка",
+        "unexpected_error": "❌ Произошла непредвиденная ошибка, попробуйте снова",
         "send_logo_caption": "Нажми чтобы сделать прогноз",
     },
     "buttons": {
@@ -61,7 +61,7 @@ user_interface = {
         "cancel_label": "Отмена",
         "currency_codes": CURRENCIES,
         "days": [str(i) for i in range(1, 10)],
-        "predict_label": "Нажми чтобы сделать прогноз"
+        "warning_label": "Я понял(-а)"
     }
 }
 
@@ -96,7 +96,8 @@ PROMPT_TEMPLATE = (
 Основные правила:
 - НЕ упоминай, как строится прогноз (регрессии, марковские цепи и т.п.), если пользователь явно не спросил "Как построен прогноз?" или не потребовал технических деталей. В обычных ответах давай только результат, числа и краткое пояснение значения.
 - Регрессия обучается на АБСОЛЮТНЫХ разностях (abs(diffs)). Знак приращения определяется марковским компонентом. Технические детали раскрывай только по прямому запросу.
-- Поддерживай практичный, в то же время формальный, дружеский тон если это того требует.
+- Поддерживай практичный, краткий и в то же время формальный, дружеский тон если это того требует.
+- Твой ответ должен состоять не более чем из 4-6 предложений
 
 Что можно показывать:
 - Последние N цен, прогнозные цены по дням, абсолютные и процентные изменения; знак (рост/падение) и величина приращения; метрики согласованности (консенсус марковского ансамбля, std регрессии) — если доступны.
@@ -525,9 +526,9 @@ def _send_start_message(bot: Bot, chat_id: int):
                 msg = bot.send_photo(
                     chat_id=chat_id,
                     photo=f,
-                    caption=user_interface["captions"]["press_to_predict"],
+                    caption=user_interface["captions"]["warning"],
                     reply_markup=InlineKeyboardMarkup(
-                        [[InlineKeyboardButton(user_interface["captions"]["press_to_predict"], callback_data="do_predict")]]
+                        [[InlineKeyboardButton(user_interface["buttons"]["warning_label"], callback_data="do_predict")]]
                     )
                 )
             _save_chat_state(chat_id, msg.message_id, True)
@@ -536,9 +537,9 @@ def _send_start_message(bot: Bot, chat_id: int):
             pass
     msg = bot.send_message(
         chat_id=chat_id,
-        text=user_interface["captions"]["press_to_predict"],
+        text=user_interface["captions"]["warning"],
         reply_markup=InlineKeyboardMarkup(
-            [[InlineKeyboardButton(user_interface["captions"]["press_to_predict"], callback_data="do_predict")]]
+            [[InlineKeyboardButton(user_interface["captions"]["warning"], callback_data="do_predict")]]
         )
     )
     _save_chat_state(chat_id, msg.message_id, False)
@@ -572,16 +573,16 @@ def _edit_with_retries(action_callable, bot: Bot, chat_id: int, message_id: int,
 
 def start_handler(update, context):
     chat_id = update.effective_chat.id
-    kb = InlineKeyboardMarkup([[InlineKeyboardButton(user_interface["captions"]["press_to_predict"], callback_data="do_predict")]])
+    kb = InlineKeyboardMarkup([[InlineKeyboardButton(user_interface["buttons"]["warning_label"], callback_data="do_predict")]])
     if os.path.exists(LOGO_PATH):
         try:
             with open(LOGO_PATH, "rb") as f:
-                msg = context.bot.send_photo(chat_id=chat_id, photo=f, caption=user_interface["captions"]["press_to_predict"], reply_markup=kb)
+                msg = context.bot.send_photo(chat_id=chat_id, photo=f, caption=user_interface["captions"]["warning"], reply_markup=kb)
             _save_chat_state(chat_id, msg.message_id, True)
             return
         except Exception:
             pass
-    msg = context.bot.send_message(chat_id=chat_id, text=user_interface["captions"]["press_to_predict"], reply_markup=kb)
+    msg = context.bot.send_message(chat_id=chat_id, text=user_interface["captions"]["warning"], reply_markup=kb)
     _save_chat_state(chat_id, msg.message_id, False)
 
 def _replace_with_logo(bot, chat_id, message_id, caption=None, reply_markup=None, max_attempts=3, delay=1.0):
@@ -801,7 +802,7 @@ def _perform_prediction_and_edit(bot, chat_id, message_id, user_id, first, secon
     ask_cb = f"ask:{first}:{second}:{days}"
     ask_label = user_interface["buttons"]["ask_label_first"] if state.get("asked_count", 0) == 0 else user_interface["buttons"]["ask_label_more"]
     kb = _make_rows([[ (user_interface["buttons"]["back_label"], "back:first"), (ask_label, ask_cb) ]])
-    _edit_or_send_media(bot, chat_id, message_id, caption=advice, media_path=out_path, reply_markup=kb)
+    _edit_or_send_media(bot, chat_id, message_id, caption=f"{first}/{second}\n{advice}", media_path=out_path, reply_markup=kb)
 
     state.update({
         "last_media": out_path,
@@ -843,14 +844,14 @@ def cb_query(update, context):
     if cmd == "first" and len(parts) == 2:
         first = parts[1]
         def try_edit():
-            context.bot.edit_message_caption(chat_id=chat_id, message_id=message_id, caption=user_interface["captions"]["choose_second"], reply_markup=_kb_second(first))
+            context.bot.edit_message_caption(chat_id=chat_id, message_id=message_id, caption=f"Первая валюта: {first}\n{user_interface["captions"]["choose_second"]}", reply_markup=_kb_second(first))
         _edit_with_retries(try_edit, context.bot, chat_id, message_id)
         return
 
     if cmd == "second" and len(parts) == 3:
         _, first, second = parts
         def try_edit():
-            context.bot.edit_message_caption(chat_id=chat_id, message_id=message_id, caption=user_interface["captions"]["choose_days"], reply_markup=_kb_days(first, second))
+            context.bot.edit_message_caption(chat_id=chat_id, message_id=message_id, caption=f"Валютная пара: {first}/{second}\n{user_interface["captions"]["choose_days"]}", reply_markup=_kb_days(first, second))
         _edit_with_retries(try_edit, context.bot, chat_id, message_id)
         return
 
@@ -918,7 +919,7 @@ def cb_query(update, context):
 
         if len(parts) >= 3 and parts[1] == "second":
             first = parts[2]
-            _replace_with_logo(context.bot, chat_id, message_id, caption=user_interface["captions"]["choose_second"], reply_markup=_kb_second(first))
+            _replace_with_logo(context.bot, chat_id, message_id, caption=f"Первая валюта: {first}\n{user_interface["captions"]["choose_second"]}", reply_markup=_kb_second(first))
             return
 
     query.answer(text="Неизвестная команда", show_alert=False)
