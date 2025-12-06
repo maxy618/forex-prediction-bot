@@ -57,7 +57,7 @@ user_interface = {
     "buttons": {
         "back_label": "Назад",
         "ask_label_first": "Задать вопрос",
-        "ask_label_more": "Задать ещё вопрос",
+        "ask_label_more": "Ещё вопрос",
         "cancel_label": "Отмена",
         "currency_codes": CURRENCIES,
         "days": [str(i) for i in range(1, 10)],
