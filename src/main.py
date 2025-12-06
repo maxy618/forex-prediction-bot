@@ -15,6 +15,9 @@ from requests.adapters import HTTPAdapter, Retry
 from dotenv import load_dotenv
 load_dotenv()
 
+from logging_util import setup_logging, exception_rid
+logger = setup_logging(name=__name__)
+
 from matplotlib import use
 use("Agg")
 import matplotlib.pyplot as plt
@@ -326,10 +329,10 @@ def fetch_for_date(d, base_latest, base_archive):
         if r.status_code == 200:
             try:
                 return r.json()
-            except ValueError:
-                pass
-    except Exception:
-        pass
+            except ValueError as e:
+                logger.warning("fetch_for_date: invalid json for %s: %s", url, e)
+    except Exception as e:
+        logger.exception("fetch_for_date: initial request failed for %s", url)
     try:
         time.sleep(0.2)
         r = SESSION.get(url, timeout=6)
@@ -338,18 +341,18 @@ def fetch_for_date(d, base_latest, base_archive):
                 return r.json()
             except ValueError:
                 pass
-    except Exception:
-        pass
+    except Exception as e:
+        logger.exception("fetch_for_date: retry request failed for %s", url)
     if url != base_latest:
         try:
             r = SESSION.get(base_latest, timeout=6)
             if r.status_code == 200:
                 try:
                     return r.json()
-                except ValueError:
-                    pass
-        except Exception:
-            pass
+                except ValueError as e:
+                    logger.warning("fetch_for_date: invalid json for base_latest %s: %s", base_latest, e)
+        except Exception as e:
+            logger.exception("fetch_for_date: fallback request failed for %s", base_latest)
     return None
 
 
@@ -533,8 +536,8 @@ def _send_start_message(bot: Bot, chat_id: int):
                 )
             _save_chat_state(chat_id, msg.message_id, True)
             return msg
-        except Exception:
-            pass
+        except Exception as e:
+            logger.exception("_send_start_message: failed to send photo to %s", chat_id)
     msg = bot.send_message(
         chat_id=chat_id,
         text=user_interface["captions"]["warning"],
@@ -554,21 +557,23 @@ def _edit_with_retries(action_callable, bot: Bot, chat_id: int, message_id: int,
             return True
         except Exception as e:
             last_exc = e
+            logger.exception("_edit_with_retries: attempt %s failed", attempt)
             if attempt < max_attempts:
                 time.sleep(delay)
                 continue
     try:
         bot.delete_message(chat_id=chat_id, message_id=message_id)
-    except Exception:
-        pass
+    except Exception as e:
+        logger.exception("_edit_with_retries: failed to delete old message chat=%s msg=%s", chat_id, message_id)
     try:
-        bot.send_message(chat_id=chat_id, text=user_interface["captions"]["unexpected_error"])
-    except Exception:
-        pass
+        rid = exception_rid(logger, "_edit_with_retries: final failure", exc=last_exc)
+        bot.send_message(chat_id=chat_id, text=f"{user_interface['captions']['unexpected_error']} (id: {rid})")
+    except Exception as e:
+        logger.exception("_edit_with_retries: failed to send unexpected_error to chat=%s", chat_id)
     try:
         _send_start_message(bot, chat_id)
-    except Exception:
-        pass
+    except Exception as e:
+        logger.exception("_edit_with_retries: failed to resend start message to chat=%s", chat_id)
     return False
 
 def start_handler(update, context):
@@ -580,10 +585,13 @@ def start_handler(update, context):
                 msg = context.bot.send_photo(chat_id=chat_id, photo=f, caption=user_interface["captions"]["warning"], reply_markup=kb)
             _save_chat_state(chat_id, msg.message_id, True)
             return
-        except Exception:
-            pass
-    msg = context.bot.send_message(chat_id=chat_id, text=user_interface["captions"]["warning"], reply_markup=kb)
-    _save_chat_state(chat_id, msg.message_id, False)
+        except Exception as e:
+            logger.exception("start_handler: failed to send photo to %s", chat_id)
+    try:
+        msg = context.bot.send_message(chat_id=chat_id, text=user_interface["captions"]["warning"], reply_markup=kb)
+        _save_chat_state(chat_id, msg.message_id, False)
+    except Exception as e:
+        logger.exception("start_handler: failed to send warning message to %s", chat_id)
 
 def _replace_with_logo(bot, chat_id, message_id, caption=None, reply_markup=None, max_attempts=3, delay=1.0):
     state = _get_chat_state(chat_id)
@@ -628,32 +636,35 @@ def _edit_or_send_media(bot, chat_id, message_id, caption=None, media_path=None,
                 new_msg = bot.send_photo(chat_id=chat_id, photo=f, caption=caption, reply_markup=reply_markup)
             try:
                 bot.delete_message(chat_id=chat_id, message_id=message_id)
-            except Exception:
-                pass
+            except Exception as e:
+                logger.exception("_edit_or_send_media: failed to delete old media message chat=%s msg=%s", chat_id, message_id)
             _save_chat_state(chat_id, new_msg.message_id, False)
             return
-        except Exception:
+        except Exception as e:
+            logger.exception("_edit_or_send_media: send media failed for chat=%s path=%s", chat_id, media_path)
             try:
                 new_msg = bot.send_message(chat_id=chat_id, text=caption or "", reply_markup=reply_markup)
                 try:
                     bot.delete_message(chat_id=chat_id, message_id=message_id)
-                except Exception:
-                    pass
+                except Exception as e:
+                    logger.exception("_edit_or_send_media: failed to delete old message on fallback chat=%s msg=%s", chat_id, message_id)
                 _save_chat_state(chat_id, new_msg.message_id, False)
                 return
-            except Exception:
+            except Exception as e:
+                logger.exception("_edit_or_send_media: fully failed to send for chat=%s", chat_id)
                 try:
                     bot.delete_message(chat_id=chat_id, message_id=message_id)
-                except Exception:
-                    pass
+                except Exception as e:
+                    logger.exception("_edit_or_send_media: failed delete after full failure chat=%s msg=%s", chat_id, message_id)
                 try:
-                    bot.send_message(chat_id=chat_id, text=user_interface["captions"]["unexpected_error"])
-                except Exception:
-                    pass
+                    rid = exception_rid(logger, "_edit_or_send_media final failure", exc=e)
+                    bot.send_message(chat_id=chat_id, text=f"{user_interface['captions']['unexpected_error']} (id: {rid})")
+                except Exception as e:
+                    logger.exception("_edit_or_send_media: failed to send unexpected_error to chat=%s", chat_id)
                 try:
                     _send_start_message(bot, chat_id)
-                except Exception:
-                    pass
+                except Exception as e:
+                    logger.exception("_edit_or_send_media: failed to send start message to chat=%s", chat_id)
                 return
     else:
         def try_edit_caption():
@@ -676,17 +687,19 @@ def call_gemini_advice(question_text: str, summary_text: str):
     try:
         r = SESSION.post(GEMINI_URL, headers=headers, data=json.dumps(payload), timeout=30)
         r.raise_for_status()
-    except Exception:
+    except Exception as e:
+        logger.exception("call_gemini_advice: request to model failed")
         return None
 
     try:
         j = r.json()
-    except Exception:
+    except Exception as e:
+        logger.exception("call_gemini_advice: failed to parse json response")
         return None
 
     try:
         return j["candidates"][0]["content"]["parts"][0]["text"].strip()
-    except Exception:
+    except Exception as e:
         def walk(o):
             if isinstance(o, str):
                 return o
@@ -702,12 +715,15 @@ def call_gemini_advice(question_text: str, summary_text: str):
                         return found
             return None
         txt = walk(j)
-        return txt.strip() if txt else None
+        if txt:
+            return txt.strip()
+        logger.warning("call_gemini_advice: no text found in response")
+        return None
 
 def _perform_prediction_and_edit(bot, chat_id, message_id, user_id, first, second, days):
     try:
         needed_days = max(MODELS_SETTINGS["reg"]["max_n"], MODELS_SETTINGS["markov"]["max_n"])
-    except Exception:
+    except Exception as e:
         needed_days = days if days > 0 else 10
 
     try:
@@ -820,8 +836,8 @@ def _perform_prediction_and_edit(bot, chat_id, message_id, user_id, first, secon
 
     try:
         os.remove(out_path)
-    except Exception:
-        pass
+    except Exception as e:
+        logger.exception("_perform_prediction_and_edit: failed to remove temp file %s", out_path)
 
 def cb_query(update, context):
     query = update.callback_query
@@ -880,11 +896,11 @@ def cb_query(update, context):
                 context.bot.edit_message_caption(chat_id=chat_id, message_id=message_id,
                                                  caption=user_interface["captions"]["ask_question"], reply_markup=_make_rows([[ (user_interface["buttons"]["cancel_label"], f"cancel_ask") ]]))
             _edit_with_retries(try_edit_ask, context.bot, chat_id, message_id)
-        except Exception:
+        except Exception as e:
             try:
                 context.bot.send_message(chat_id=chat_id, text=user_interface["captions"]["ask_question"], reply_markup=_make_rows([[ (user_interface["buttons"]["cancel_label"], f"cancel_ask") ]]))
-            except Exception:
-                pass
+            except Exception as e:
+                logger.exception("cb_query: failed to send ask_question fallback to chat=%s", chat_id)
         return
 
     if cmd == "cancel_ask":
@@ -906,11 +922,11 @@ def cb_query(update, context):
                 context.bot.edit_message_caption(chat_id=chat_id, message_id=message_id,
                                                  caption=advice_text, reply_markup=kb)
             _edit_with_retries(try_edit_back, context.bot, chat_id, message_id)
-        except Exception:
+        except Exception as e:
             try:
                 context.bot.send_message(chat_id=chat_id, text=advice_text, reply_markup=kb)
-            except Exception:
-                pass
+            except Exception as e:
+                logger.exception("cb_query: failed to send advice_text fallback to chat=%s", chat_id)
 
     if cmd == "back":
         if len(parts) >= 2 and parts[1] == "first":
@@ -941,8 +957,8 @@ def question_message_handler(update, context):
 
     try:
         context.bot.delete_message(chat_id=chat_id, message_id=user_msg_id)
-    except Exception:
-        pass
+    except Exception as e:
+        logger.exception("question_message_handler: failed to delete user message %s in chat=%s", user_msg_id, chat_id)
 
     bot_msg_id = state.get("msg_id")
     def try_edit_awaiting():
@@ -958,7 +974,8 @@ def question_message_handler(update, context):
             pair_key = f"{second}_per_{first}"
             dates = sorted(all_rates.keys())
             prices = [float(all_rates[d][pair_key]) for d in dates]
-        except Exception:
+        except Exception as e:
+            logger.exception("question_message_handler: failed to fetch prices for chat=%s", chat_id)
             prices = []
         last_prices_text = ", ".join(f"{p:.6f}" for p in (prices[-3:] if prices else []))
 
@@ -990,7 +1007,7 @@ def question_message_handler(update, context):
         else:
             summary_text = f"{history_text}Pair: {first}/{second}\nLatest prices: {last_prices_text}\nForecast days: {days}\n"
 
-    except Exception:
+    except Exception as e:
         summary_text = "Chart data: unavailable.\n"
 
     gemini_resp = call_gemini_advice(text, summary_text)
@@ -1019,11 +1036,11 @@ def question_message_handler(update, context):
         def try_edit_final():
             context.bot.edit_message_caption(chat_id=chat_id, message_id=bot_msg_id, caption=final_caption, reply_markup=kb)
         _edit_with_retries(try_edit_final, context.bot, chat_id, bot_msg_id)
-    except Exception:
+    except Exception as e:
         try:
             context.bot.send_message(chat_id=chat_id, text=final_caption, reply_markup=kb)
-        except Exception:
-            pass
+        except Exception as e:
+            logger.exception("question_message_handler: failed to send message to chat=%s", chat_id)
 
 def telegram_main():
     req = Request(connect_timeout=30, read_timeout=30)
