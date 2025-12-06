@@ -27,6 +27,8 @@ from telegram.utils.request import Request
 # ==============================
 # CONFIG
 # ==============================
+CURRENCIES = ["EUR", "USD", "RUB"]
+
 MODELS_SETTINGS = {
     "REBUILD": True,
     "reg": {
@@ -40,14 +42,35 @@ MODELS_SETTINGS = {
     }
 }
 
+user_interface = {
+    "captions": {
+        "press_to_predict": "Нажми чтобы сделать прогноз",
+        "choose_first": "Выберите первую валюту",
+        "choose_second": "Выберите вторую валюту",
+        "choose_days": "Выберите количество дней (1-9)",
+        "predicting": "Выполняется прогноз, секунду...",
+        "ask_question": "Отправьте вопрос по графику",
+        "awaiting_assistant": "Ожидайте ответ ассистента...",
+        "unexpected_error": "❌ произошла непредвиденная ошибка",
+        "send_logo_caption": "Нажми чтобы сделать прогноз",
+    },
+    "buttons": {
+        "back_label": "Назад",
+        "ask_label_first": "Задать вопрос",
+        "ask_label_more": "Задать ещё вопрос",
+        "cancel_label": "Отмена",
+        "currency_codes": CURRENCIES,
+        "days": [str(i) for i in range(1, 10)],
+        "predict_label": "Нажми чтобы сделать прогноз"
+    }
+}
+
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
 
 DATASETS_PATH = "../datasets/"
 MODELS_PATH = "../models/"
 TEMP_FOLDER = "../temp/"
 LOGO_PATH = "../assets/logo.png"
-
-CURRENCIES = ["EUR", "USD", "RUB"]
 
 BASE_LATEST = "https://www.cbr-xml-daily.ru/daily_json.js"
 BASE_ARCHIVE = "https://www.cbr-xml-daily.ru/archive"
@@ -67,12 +90,30 @@ GEMINI_MODEL = "gemini-2.5-flash"
 GEMINI_URL = f"https://generativelanguage.googleapis.com/v1beta/models/{GEMINI_MODEL}:generateContent"
 
 PROMPT_TEMPLATE = (
-    "Ты — краткий практичный финансовый ассистент-анализатор. "
-    "Внимание: у тебя нет реального изображения графика, но тебе даётся текстовая сводка с последними ценами и прогнозными значениями — "
-    "проанализируй их как будто видел график (внимай трендам, диапазонам, направлению и волатильности).\n\n"
-    "Требуется ответить на пользовательский вопрос по графику. Всегда старайся ответить конкретно, однозначно. Если вопрос сильно отклоняется от темы, можешь не отвечать "
-    "Давай ответ коротко, по делу (примерно 4 предложения) на русском. Укажи, если нужно, количественную оценку (проценты/абсолютные изменения).\n\n"
-    "Данные для анализа (ниже):\n"
+    """
+Кратко и прямо: ты — ассистент для телеграм бота прогнозов валютных пар.
+
+Основные правила:
+- НЕ упоминай, как строится прогноз (регрессии, марковские цепи и т.п.), если пользователь явно не спросил "Как построен прогноз?" или не потребовал технических деталей. В обычных ответах давай только результат, числа и краткое пояснение значения.
+- Регрессия обучается на АБСОЛЮТНЫХ разностях (abs(diffs)). Знак приращения определяется марковским компонентом. Технические детали раскрывай только по прямому запросу.
+- Поддерживай практичный, в то же время формальный, дружеский тон если это того требует.
+
+Что можно показывать:
+- Последние N цен, прогнозные цены по дням, абсолютные и процентные изменения; знак (рост/падение) и величина приращения; метрики согласованности (консенсус марковского ансамбля, std регрессии) — если доступны.
+- Простые рекомендации: "стоит" / "не стоит" покупать с числовыми обоснованиями.
+
+Запрещено: использовать стандартные оговорки типа "это не инвестиционная рекомендация" или похожие фразы; придумывать недоступные данные (если данных нет — скажи, что недоступны). 
+
+Вход (summary_text) выглядит так:
+Pair: EUR/USD
+Latest prices: 100.123456, 100.234567, 100.345678
+Forecast days: 3
+Forecasted prices: 100.400000, 100.450000, 100.500000
+Forecast delta (last vs current): 0.154322
+Advice (bot): стоит покупать — прогноз роста
+
+Теперь: прочитай summary_text и вопрос пользователя и ответь.
+"""
 )
 
 
@@ -123,13 +164,11 @@ def build_markov_model(sequence, order=1):
     
     counters = defaultdict(Counter)
     
-    # counters
     for idx in range(len(sequence) - order):
         current_state = tuple(sequence[idx:idx+order])
         next_state = sequence[idx+order]
         counters[current_state][next_state] += 1
     
-    # converting to probabilities
     model = {}
     for state, counter in counters.items():
         model[state] = counts_to_probabilities(counter)
@@ -206,8 +245,8 @@ def build_regression(diffs_list, n_lags=1):
         x.append(prev_diffs)
         y.append(curr_diff)
 
-    X_mat = np.array(x, dtype=float)                 # (N, n_lags)
-    y_vec = np.array(y, dtype=float).reshape(-1, 1)  # (N, 1)
+    X_mat = np.array(x, dtype=float)
+    y_vec = np.array(y, dtype=float).reshape(-1, 1)
 
     ones = np.ones((X_mat.shape[0], 1))
     X_with_bias = np.hstack([X_mat, ones])
@@ -222,7 +261,7 @@ def build_regression(diffs_list, n_lags=1):
 
 
 def predict_diff(last_diffs, coeffs):
-    n_lags = len(coeffs) - 1  # w/o bias
+    n_lags = len(coeffs) - 1
     
     if len(last_diffs) < n_lags:
         raise ValueError("last_diffs length is smaller than required n_lags")
@@ -328,13 +367,12 @@ def rub_per_one_from_json(js, code):
 
 def fetch_sequences_all_pairs(currencies, days=max(MODELS_SETTINGS["markov"]["max_n"], MODELS_SETTINGS["reg"]["max_n"])):
     dates = get_dates_list(days)
-    last_known = {c: None for c in currencies}  # RUB per 1 <currency>
+    last_known = {c: None for c in currencies}
 
     res = {}
     for d in dates:
         js = fetch_for_date(d, BASE_LATEST, BASE_ARCHIVE)
         if js is None:
-            # 2nd attemp
             time.sleep(0.2)
             js = fetch_for_date(d, BASE_LATEST, BASE_ARCHIVE)
 
@@ -433,45 +471,42 @@ def plot_sequence(old_prices, new_prices, filename):
 
 # ==============================
 # TELEGRAM
-# ==============================
-CHAT_STATE = {}  # chat_id -> {"msg_id": int, "has_logo": bool, "last_media": str, "first":..., "awaiting_question": bool}
-
+CHAT_STATE = {}
 
 def _temp_file(user_id):
     os.makedirs(TEMP_FOLDER, exist_ok=True)
     return os.path.join(TEMP_FOLDER, f"{user_id}_{int(time.time()*1000)}.png")
 
-
 def _kb_first():
-    return _make_rows([[(c, f"first:{c}") for c in CURRENCIES]])
-
+    # Use labels from user_interface to build first-currency buttons
+    codes = user_interface["buttons"].get("currency_codes", CURRENCIES)
+    return _make_rows([[(c, f"first:{c}") for c in codes]])
 
 def _kb_second(first):
-    buttons = [(c, f"second:{first}:{c}") for c in CURRENCIES if c != first]
-    buttons.append(("Назад", "back:first"))
+    codes = user_interface["buttons"].get("currency_codes", CURRENCIES)
+    buttons = [(c, f"second:{first}:{c}") for c in codes if c != first]
+    buttons.append((user_interface["buttons"]["back_label"], "back:first"))
     return _make_rows([buttons])
-
 
 def _kb_days(first, second):
     rows = []
     row = []
-    for i in range(1, 10):
-        row.append((str(i), f"days:{first}:{second}:{i}"))
+    day_labels = user_interface["buttons"].get("days", [str(i) for i in range(1, 10)])
+    for i, label in enumerate(day_labels, start=1):
+        row.append((label, f"days:{first}:{second}:{i}"))
         if len(row) == 3:
             rows.append(row)
             row = []
     if row:
         rows.append(row)
-    rows.append([("Назад", f"back:second:{first}")])
+    rows.append([ (user_interface["buttons"]["back_label"], f"back:second:{first}") ])
     return _make_rows(rows)
-
 
 def _make_rows(pairs):
     keyboard = []
     for row in pairs:
         keyboard.append([InlineKeyboardButton(text, callback_data=cb) for text, cb in row])
     return InlineKeyboardMarkup(keyboard)
-
 
 def _save_chat_state(chat_id, message_id, has_logo, **kwargs):
     state = CHAT_STATE.get(chat_id, {})
@@ -480,73 +515,124 @@ def _save_chat_state(chat_id, message_id, has_logo, **kwargs):
         state[k] = v
     CHAT_STATE[chat_id] = state
 
-
 def _get_chat_state(chat_id):
     return CHAT_STATE.get(chat_id, {"msg_id": None, "has_logo": False, "awaiting_question": False})
 
-
-def start_handler(update, context):
-    chat_id = update.effective_chat.id
-    kb = InlineKeyboardMarkup([[InlineKeyboardButton("Сделать прогноз", callback_data="do_predict")]])
-    if os.path.exists(LOGO_PATH):
-        with open(LOGO_PATH, "rb") as f:
-            msg = context.bot.send_photo(chat_id=chat_id, photo=f, caption="Нажми чтобы сделать прогноз", reply_markup=kb)
-        _save_chat_state(chat_id, msg.message_id, True)
-    else:
-        msg = context.bot.send_message(chat_id=chat_id, text="Нажми чтобы сделать прогноз", reply_markup=kb)
-        _save_chat_state(chat_id, msg.message_id, False)
-
-
-def _replace_with_logo(bot, chat_id, message_id, caption=None, reply_markup=None):
-    state = _get_chat_state(chat_id)
-    if state["has_logo"]:
-        try:
-            bot.edit_message_caption(chat_id=chat_id, message_id=message_id, caption=caption, reply_markup=reply_markup)
-        except Exception:
-            bot.send_message(chat_id=chat_id, text=caption or "", reply_markup=reply_markup)
-        return
-
+def _send_start_message(bot: Bot, chat_id: int):
     if os.path.exists(LOGO_PATH):
         try:
             with open(LOGO_PATH, "rb") as f:
-                media = InputMediaPhoto(f, caption=caption)
-                bot.edit_message_media(media=media, chat_id=chat_id, message_id=message_id, reply_markup=reply_markup)
-            _save_chat_state(chat_id, message_id, True)
+                msg = bot.send_photo(
+                    chat_id=chat_id,
+                    photo=f,
+                    caption=user_interface["captions"]["press_to_predict"],
+                    reply_markup=InlineKeyboardMarkup(
+                        [[InlineKeyboardButton(user_interface["captions"]["press_to_predict"], callback_data="do_predict")]]
+                    )
+                )
+            _save_chat_state(chat_id, msg.message_id, True)
+            return msg
+        except Exception:
+            pass
+    msg = bot.send_message(
+        chat_id=chat_id,
+        text=user_interface["captions"]["press_to_predict"],
+        reply_markup=InlineKeyboardMarkup(
+            [[InlineKeyboardButton(user_interface["captions"]["press_to_predict"], callback_data="do_predict")]]
+        )
+    )
+    _save_chat_state(chat_id, msg.message_id, False)
+    return msg
+
+def _edit_with_retries(action_callable, bot: Bot, chat_id: int, message_id: int,
+                       max_attempts: int = 3, delay: float = 1.0):
+    last_exc = None
+    for attempt in range(1, max_attempts + 1):
+        try:
+            action_callable()
+            return True
+        except Exception as e:
+            last_exc = e
+            if attempt < max_attempts:
+                time.sleep(delay)
+                continue
+    try:
+        bot.delete_message(chat_id=chat_id, message_id=message_id)
+    except Exception:
+        pass
+    try:
+        bot.send_message(chat_id=chat_id, text=user_interface["captions"]["unexpected_error"])
+    except Exception:
+        pass
+    try:
+        _send_start_message(bot, chat_id)
+    except Exception:
+        pass
+    return False
+
+def start_handler(update, context):
+    chat_id = update.effective_chat.id
+    kb = InlineKeyboardMarkup([[InlineKeyboardButton(user_interface["captions"]["press_to_predict"], callback_data="do_predict")]])
+    if os.path.exists(LOGO_PATH):
+        try:
+            with open(LOGO_PATH, "rb") as f:
+                msg = context.bot.send_photo(chat_id=chat_id, photo=f, caption=user_interface["captions"]["press_to_predict"], reply_markup=kb)
+            _save_chat_state(chat_id, msg.message_id, True)
             return
         except Exception:
-            try:
-                bot.edit_message_caption(chat_id=chat_id, message_id=message_id, caption=caption, reply_markup=reply_markup)
-            except Exception:
-                bot.send_message(chat_id=chat_id, text=caption or "", reply_markup=reply_markup)
-            _save_chat_state(chat_id, message_id, False)
+            pass
+    msg = context.bot.send_message(chat_id=chat_id, text=user_interface["captions"]["press_to_predict"], reply_markup=kb)
+    _save_chat_state(chat_id, msg.message_id, False)
+
+def _replace_with_logo(bot, chat_id, message_id, caption=None, reply_markup=None, max_attempts=3, delay=1.0):
+    state = _get_chat_state(chat_id)
+    if state["has_logo"]:
+        def try_edit_caption():
+            bot.edit_message_caption(chat_id=chat_id, message_id=message_id, caption=caption, reply_markup=reply_markup)
+        success = _edit_with_retries(try_edit_caption, bot, chat_id, message_id, max_attempts=max_attempts, delay=delay)
+        if not success:
             return
+        return
 
-    try:
+    if os.path.exists(LOGO_PATH):
+        def try_edit_media():
+            with open(LOGO_PATH, "rb") as f:
+                media = InputMediaPhoto(f, caption=caption)
+                bot.edit_message_media(media=media, chat_id=chat_id, message_id=message_id, reply_markup=reply_markup)
+        success = _edit_with_retries(try_edit_media, bot, chat_id, message_id, max_attempts=max_attempts, delay=delay)
+        if success:
+            _save_chat_state(chat_id, message_id, True)
+            return
+        return
+
+    def try_edit_caption_no_logo():
         bot.edit_message_caption(chat_id=chat_id, message_id=message_id, caption=caption, reply_markup=reply_markup)
-    except Exception:
-        bot.send_message(chat_id=chat_id, text=caption or "", reply_markup=reply_markup)
-    _save_chat_state(chat_id, message_id, False)
+    success = _edit_with_retries(try_edit_caption_no_logo, bot, chat_id, message_id, max_attempts=max_attempts, delay=delay)
+    if success:
+        _save_chat_state(chat_id, message_id, False)
+    return
 
-
-def _edit_or_send_media(bot, chat_id, message_id, caption=None, media_path=None, reply_markup=None):
+def _edit_or_send_media(bot, chat_id, message_id, caption=None, media_path=None, reply_markup=None, max_attempts=3, delay=1.0):
     if media_path and os.path.exists(media_path):
-        try:
+        def try_edit_media():
             with open(media_path, "rb") as f:
                 media = InputMediaPhoto(f, caption=caption)
                 bot.edit_message_media(media=media, chat_id=chat_id, message_id=message_id, reply_markup=reply_markup)
+        success = _edit_with_retries(try_edit_media, bot, chat_id, message_id, max_attempts=max_attempts, delay=delay)
+        if success:
             _save_chat_state(chat_id, message_id, False)
+            return
+        try:
+            with open(media_path, "rb") as f:
+                new_msg = bot.send_photo(chat_id=chat_id, photo=f, caption=caption, reply_markup=reply_markup)
+            try:
+                bot.delete_message(chat_id=chat_id, message_id=message_id)
+            except Exception:
+                pass
+            _save_chat_state(chat_id, new_msg.message_id, False)
             return
         except Exception:
             try:
-                with open(media_path, "rb") as f:
-                    new_msg = bot.send_photo(chat_id=chat_id, photo=f, caption=caption, reply_markup=reply_markup)
-                try:
-                    bot.delete_message(chat_id=chat_id, message_id=message_id)
-                except Exception:
-                    pass
-                _save_chat_state(chat_id, new_msg.message_id, False)
-                return
-            except Exception:
                 new_msg = bot.send_message(chat_id=chat_id, text=caption or "", reply_markup=reply_markup)
                 try:
                     bot.delete_message(chat_id=chat_id, message_id=message_id)
@@ -554,21 +640,29 @@ def _edit_or_send_media(bot, chat_id, message_id, caption=None, media_path=None,
                     pass
                 _save_chat_state(chat_id, new_msg.message_id, False)
                 return
+            except Exception:
+                try:
+                    bot.delete_message(chat_id=chat_id, message_id=message_id)
+                except Exception:
+                    pass
+                try:
+                    bot.send_message(chat_id=chat_id, text=user_interface["captions"]["unexpected_error"])
+                except Exception:
+                    pass
+                try:
+                    _send_start_message(bot, chat_id)
+                except Exception:
+                    pass
+                return
     else:
-        try:
+        def try_edit_caption():
             bot.edit_message_caption(chat_id=chat_id, message_id=message_id, caption=caption, reply_markup=reply_markup)
+        success = _edit_with_retries(try_edit_caption, bot, chat_id, message_id, max_attempts=max_attempts, delay=delay)
+        if success:
             state = _get_chat_state(chat_id)
             _save_chat_state(chat_id, message_id, state.get("has_logo", False))
             return
-        except Exception:
-            new_msg = bot.send_message(chat_id=chat_id, text=caption or "", reply_markup=reply_markup)
-            try:
-                bot.delete_message(chat_id=chat_id, message_id=message_id)
-            except Exception:
-                pass
-            _save_chat_state(chat_id, new_msg.message_id, False)
-            return
-
+        return
 
 def call_gemini_advice(question_text: str, summary_text: str):
     prompt = PROMPT_TEMPLATE + summary_text + "\n\nUser question:\n" + question_text + "\n\nОтвет:"
@@ -576,8 +670,6 @@ def call_gemini_advice(question_text: str, summary_text: str):
         "contents": [
             {"parts": [{"text": prompt}]}
         ],
-        # "temperature": 0.2,
-        # "max_output_tokens": 256,
     }
     headers = {"Content-Type": "application/json", "x-goog-api-key": GEMINI_API_KEY}
     try:
@@ -591,11 +683,9 @@ def call_gemini_advice(question_text: str, summary_text: str):
     except Exception:
         return None
 
-    # try to extract text
     try:
         return j["candidates"][0]["content"]["parts"][0]["text"].strip()
     except Exception:
-        # fallback walk
         def walk(o):
             if isinstance(o, str):
                 return o
@@ -613,7 +703,6 @@ def call_gemini_advice(question_text: str, summary_text: str):
         txt = walk(j)
         return txt.strip() if txt else None
 
-
 def _perform_prediction_and_edit(bot, chat_id, message_id, user_id, first, second, days):
     try:
         needed_days = max(MODELS_SETTINGS["reg"]["max_n"], MODELS_SETTINGS["markov"]["max_n"])
@@ -623,11 +712,10 @@ def _perform_prediction_and_edit(bot, chat_id, message_id, user_id, first, secon
     try:
         all_rates = fetch_sequences_all_pairs(CURRENCIES, days=needed_days)
     except Exception as e:
-        try:
+        def try_edit_error():
             bot.edit_message_caption(chat_id=chat_id, message_id=message_id,
                                      caption=f"Ошибка при получении актуальных данных: {e}")
-        except Exception:
-            pass
+        _edit_with_retries(try_edit_error, bot, chat_id, message_id)
         return
 
     pair_key = f"{second}_per_{first}"
@@ -640,18 +728,16 @@ def _perform_prediction_and_edit(bot, chat_id, message_id, user_id, first, secon
                 raise RuntimeError(f"Пара {pair_key} отсутствует в данных за {d}")
             prices.append(float(day_rates[pair_key]))
     except Exception as e:
-        try:
+        def try_edit_error2():
             bot.edit_message_caption(chat_id=chat_id, message_id=message_id,
                                      caption=f"Ошибка при формировании последовательности цен: {e}")
-        except Exception:
-            pass
+        _edit_with_retries(try_edit_error2, bot, chat_id, message_id)
         return
 
     if not prices:
-        try:
+        def try_edit_err3():
             bot.edit_message_caption(chat_id=chat_id, message_id=message_id, caption="Ошибка: недостаточно данных от парсера")
-        except Exception:
-            pass
+        _edit_with_retries(try_edit_err3, bot, chat_id, message_id)
         return
 
     diffs = [0.0]
@@ -661,10 +747,9 @@ def _perform_prediction_and_edit(bot, chat_id, message_id, user_id, first, secon
 
     old_prices = prices[-3:] if len(prices) >= 3 else prices[:]
     if not old_prices:
-        try:
+        def try_edit_err4():
             bot.edit_message_caption(chat_id=chat_id, message_id=message_id, caption="Ошибка: недостаточно данных для построения графика")
-        except Exception:
-            pass
+        _edit_with_retries(try_edit_err4, bot, chat_id, message_id)
         return
 
     last_price = old_prices[-1]
@@ -709,12 +794,15 @@ def _perform_prediction_and_edit(bot, chat_id, message_id, user_id, first, secon
     verb = "стоит" if delta > 0 else "не стоит"
     advice = f"Скорее всего {verb} покупать — цена {sign_text} на {abs(delta):.6f}"
 
+    state = _get_chat_state(chat_id)
+    state.setdefault("qa_history", [])
+    state.setdefault("asked_count", 0)
+
     ask_cb = f"ask:{first}:{second}:{days}"
-    kb = _make_rows([[("Назад", "back:first"), ("Задать вопрос", ask_cb)]])
+    ask_label = user_interface["buttons"]["ask_label_first"] if state.get("asked_count", 0) == 0 else user_interface["buttons"]["ask_label_more"]
+    kb = _make_rows([[ (user_interface["buttons"]["back_label"], "back:first"), (ask_label, ask_cb) ]])
     _edit_or_send_media(bot, chat_id, message_id, caption=advice, media_path=out_path, reply_markup=kb)
 
-    # === CHANGED: save forecast into chat state so question handler can use it ===
-    state = _get_chat_state(chat_id)
     state.update({
         "last_media": out_path,
         "first": first,
@@ -728,13 +816,11 @@ def _perform_prediction_and_edit(bot, chat_id, message_id, user_id, first, secon
         "forecast_ts": int(time.time())
     })
     CHAT_STATE[chat_id] = state
-    # === /CHANGED ===
 
     try:
         os.remove(out_path)
     except Exception:
         pass
-
 
 def cb_query(update, context):
     query = update.callback_query
@@ -749,17 +835,23 @@ def cb_query(update, context):
     cmd = parts[0]
 
     if cmd == "do_predict":
-        context.bot.edit_message_caption(chat_id=chat_id, message_id=message_id, caption="Выберите первую валюту", reply_markup=_kb_first())
+        def try_edit():
+            context.bot.edit_message_caption(chat_id=chat_id, message_id=message_id, caption=user_interface["captions"]["choose_first"], reply_markup=_kb_first())
+        _edit_with_retries(try_edit, context.bot, chat_id, message_id)
         return
 
     if cmd == "first" and len(parts) == 2:
         first = parts[1]
-        context.bot.edit_message_caption(chat_id=chat_id, message_id=message_id, caption="Выберите вторую валюту", reply_markup=_kb_second(first))
+        def try_edit():
+            context.bot.edit_message_caption(chat_id=chat_id, message_id=message_id, caption=user_interface["captions"]["choose_second"], reply_markup=_kb_second(first))
+        _edit_with_retries(try_edit, context.bot, chat_id, message_id)
         return
 
     if cmd == "second" and len(parts) == 3:
         _, first, second = parts
-        context.bot.edit_message_caption(chat_id=chat_id, message_id=message_id, caption="Выберите количество дней (1-9)", reply_markup=_kb_days(first, second))
+        def try_edit():
+            context.bot.edit_message_caption(chat_id=chat_id, message_id=message_id, caption=user_interface["captions"]["choose_days"], reply_markup=_kb_days(first, second))
+        _edit_with_retries(try_edit, context.bot, chat_id, message_id)
         return
 
     if cmd == "days" and len(parts) == 4:
@@ -767,9 +859,13 @@ def cb_query(update, context):
         try:
             days = int(days_str)
         except ValueError:
-            context.bot.edit_message_caption(chat_id=chat_id, message_id=message_id, caption="Неверный выбор дней")
+            def try_edit_err():
+                context.bot.edit_message_caption(chat_id=chat_id, message_id=message_id, caption="Неверный выбор дней")
+            _edit_with_retries(try_edit_err, context.bot, chat_id, message_id)
             return
-        context.bot.edit_message_caption(chat_id=chat_id, message_id=message_id, caption="Выполняется прогноз, секунду...")
+        def try_edit_predicting():
+            context.bot.edit_message_caption(chat_id=chat_id, message_id=message_id, caption=user_interface["captions"]["predicting"])
+        _edit_with_retries(try_edit_predicting, context.bot, chat_id, message_id)
         _perform_prediction_and_edit(context.bot, chat_id, message_id, user_id, first, second, days)
         return
 
@@ -779,11 +875,13 @@ def cb_query(update, context):
         state.update({"awaiting_question": True})
         CHAT_STATE[chat_id] = state
         try:
-            context.bot.edit_message_caption(chat_id=chat_id, message_id=message_id,
-                                             caption="Отправьте вопрос по графику", reply_markup=_make_rows([[("Отмена", f"cancel_ask")]]))
+            def try_edit_ask():
+                context.bot.edit_message_caption(chat_id=chat_id, message_id=message_id,
+                                                 caption=user_interface["captions"]["ask_question"], reply_markup=_make_rows([[ (user_interface["buttons"]["cancel_label"], f"cancel_ask") ]]))
+            _edit_with_retries(try_edit_ask, context.bot, chat_id, message_id)
         except Exception:
             try:
-                context.bot.send_message(chat_id=chat_id, text="Отправьте вопрос по графику", reply_markup=_make_rows([[("Отмена", f"cancel_ask")]]))
+                context.bot.send_message(chat_id=chat_id, text=user_interface["captions"]["ask_question"], reply_markup=_make_rows([[ (user_interface["buttons"]["cancel_label"], f"cancel_ask") ]]))
             except Exception:
                 pass
         return
@@ -792,33 +890,38 @@ def cb_query(update, context):
         state = _get_chat_state(chat_id)
         state["awaiting_question"] = False
         CHAT_STATE[chat_id] = state
+
+        advice_text = state.get("advice_text")
         first = state.get("first")
         second = state.get("second")
+        days = int(state.get("days", 1)) if state.get("days") is not None else 1
+
+        kb = None
         if first and second:
-            kb = _make_rows([[("Назад", "back:first"), ("Задать вопрос", f"ask:{first}:{second}:{state.get('days',1)}")]])
+            ask_label = user_interface["buttons"]["ask_label_first"] if state.get("asked_count", 0) == 0 else user_interface["buttons"]["ask_label_more"]
+            kb = _make_rows([[ (user_interface["buttons"]["back_label"], "back:first"), (ask_label, f"ask:{first}:{second}:{days}") ]])
+        try:
+            def try_edit_back():
+                context.bot.edit_message_caption(chat_id=chat_id, message_id=message_id,
+                                                 caption=advice_text, reply_markup=kb)
+            _edit_with_retries(try_edit_back, context.bot, chat_id, message_id)
+        except Exception:
             try:
-                context.bot.edit_message_caption(chat_id=chat_id, message_id=message_id, caption="Выберите:", reply_markup=kb)
+                context.bot.send_message(chat_id=chat_id, text=advice_text, reply_markup=kb)
             except Exception:
                 pass
-        else:
-            try:
-                context.bot.edit_message_caption(chat_id=chat_id, message_id=message_id, caption="Выберите первую валюту", reply_markup=_kb_first())
-            except Exception:
-                pass
-        return
 
     if cmd == "back":
         if len(parts) >= 2 and parts[1] == "first":
-            _replace_with_logo(context.bot, chat_id, message_id, caption="Выберите первую валюту", reply_markup=_kb_first())
+            _replace_with_logo(context.bot, chat_id, message_id, caption=user_interface["captions"]["choose_first"], reply_markup=_kb_first())
             return
 
         if len(parts) >= 3 and parts[1] == "second":
             first = parts[2]
-            _replace_with_logo(context.bot, chat_id, message_id, caption="Выберите вторую валюту", reply_markup=_kb_second(first))
+            _replace_with_logo(context.bot, chat_id, message_id, caption=user_interface["captions"]["choose_second"], reply_markup=_kb_second(first))
             return
 
     query.answer(text="Неизвестная команда", show_alert=False)
-
 
 def question_message_handler(update, context):
     msg = update.message
@@ -841,13 +944,9 @@ def question_message_handler(update, context):
         pass
 
     bot_msg_id = state.get("msg_id")
-    try:
-        context.bot.edit_message_caption(chat_id=chat_id, message_id=bot_msg_id, caption="Ожидайте ответ ассистента...", reply_markup=None)
-    except Exception:
-        try:
-            context.bot.send_message(chat_id=chat_id, text="Ожидайте ответ ассистента...")
-        except Exception:
-            pass
+    def try_edit_awaiting():
+        context.bot.edit_message_caption(chat_id=chat_id, message_id=bot_msg_id, caption=user_interface["captions"]["awaiting_assistant"], reply_markup=None)
+    _edit_with_retries(try_edit_awaiting, context.bot, chat_id, bot_msg_id)
 
     try:
         first = state.get("first")
@@ -862,14 +961,24 @@ def question_message_handler(update, context):
             prices = []
         last_prices_text = ", ".join(f"{p:.6f}" for p in (prices[-3:] if prices else []))
 
-        # === CHANGED: include saved forecast in summary_text if present ===
         forecasted_prices = state.get("forecasted_prices")
         forecast_delta = state.get("forecast_delta")
         advice_text = state.get("advice_text")
 
+        qa_history = state.get("qa_history", [])
+        history_text = ""
+        if qa_history:
+            parts = []
+            for i, item in enumerate(qa_history[-5:]):
+                q = item.get("q", "")
+                a = item.get("a", "")
+                parts.append(f"Q{i+1}: {q}\nA{i+1}: {a}")
+            history_text = "\n".join(parts) + "\n"
+
         if forecasted_prices:
             forecast_text = ", ".join(f"{p:.6f}" for p in forecasted_prices)
             summary_text = (
+                f"{history_text}"
                 f"Pair: {first}/{second}\n"
                 f"Latest prices: {last_prices_text}\n"
                 f"Forecast days: {days}\n"
@@ -878,8 +987,7 @@ def question_message_handler(update, context):
                 f"Advice (bot): {advice_text}\n"
             )
         else:
-            summary_text = f"Pair: {first}/{second}\nLatest prices: {last_prices_text}\nForecast days: {days}\n"
-        # === /CHANGED ===
+            summary_text = f"{history_text}Pair: {first}/{second}\nLatest prices: {last_prices_text}\nForecast days: {days}\n"
 
     except Exception:
         summary_text = "Chart data: unavailable.\n"
@@ -892,20 +1000,29 @@ def question_message_handler(update, context):
     else:
         final_caption = "Ассистент не смог предоставить ответ (ошибка подключения к модели)."
 
+    qa_history = state.get("qa_history", [])
+    qa_history.append({"q": text, "a": final_caption})
+    qa_history = qa_history[-5:]
+    state["qa_history"] = qa_history
+    state["asked_count"] = state.get("asked_count", 0) + 1
+    CHAT_STATE[chat_id] = state
+
     first = state.get("first")
     second = state.get("second")
     kb = None
     if first and second:
-        kb = _make_rows([[("Назад", "back:first"), ("Задать вопрос", f"ask:{first}:{second}:{state.get('days',1)}")]])
+        ask_label = user_interface["buttons"]["ask_label_first"] if state.get("asked_count", 0) == 0 else user_interface["buttons"]["ask_label_more"]
+        kb = _make_rows([[ (user_interface["buttons"]["back_label"], "back:first"), (ask_label, f"ask:{first}:{second}:{state.get('days',1)}") ]])
     try:
         bot_msg_id = state.get("msg_id")
-        context.bot.edit_message_caption(chat_id=chat_id, message_id=bot_msg_id, caption=final_caption, reply_markup=kb)
+        def try_edit_final():
+            context.bot.edit_message_caption(chat_id=chat_id, message_id=bot_msg_id, caption=final_caption, reply_markup=kb)
+        _edit_with_retries(try_edit_final, context.bot, chat_id, bot_msg_id)
     except Exception:
         try:
             context.bot.send_message(chat_id=chat_id, text=final_caption, reply_markup=kb)
         except Exception:
             pass
-
 
 def telegram_main():
     req = Request(connect_timeout=30, read_timeout=30)
@@ -921,7 +1038,6 @@ def telegram_main():
 
 # ==============================
 # MAIN
-# ==============================
 def train_models_if_needed(markov_min_n, markov_max_n, reg_min_n, reg_max_n):
     os.makedirs(MODELS_PATH, exist_ok=True)
     pairs = []
@@ -941,13 +1057,11 @@ def train_models_if_needed(markov_min_n, markov_max_n, reg_min_n, reg_max_n):
         diffs_s = read_column("Difference", csv_path)
         diffs = [float(x) for x in diffs_s]
 
-        # regression models
         for n_lags in range(reg_min_n, reg_max_n+1):
             if len(diffs) > n_lags:
                 coeffs = build_regression(diffs, n_lags=n_lags)
                 save_model(coeffs, os.path.join(MODELS_PATH, f"regression_{a}{b}_{n_lags}.pkl"))
 
-        # markov models 
         for order in range(markov_min_n, markov_max_n+1):
             if len(signs) > order:
                 m = build_markov_model(signs, order=order)
