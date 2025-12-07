@@ -5,6 +5,9 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 
 
+DPI = 100
+
+
 def make_axes_limits(prices):
     min_price = min(prices)
     max_price = max(prices)
@@ -60,7 +63,7 @@ def plot_sequence(old_prices, new_prices, filename):
 
     out_dir = os.path.dirname(filename) or "."
     os.makedirs(out_dir, exist_ok=True)
-    plt.savefig(filename, bbox_inches="tight", facecolor="black")
+    plt.savefig(filename, bbox_inches="tight", facecolor="black", dpi=DPI)
     plt.close()
 
     return filename
