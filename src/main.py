@@ -47,7 +47,6 @@ MODELS_SETTINGS = {
     }
 }
 
-# cache TTL in seconds (default 5 minutes)
 CACHE_TTL = int(os.getenv("CACHE_TTL", 300))
 
 user_interface = {
@@ -83,6 +82,7 @@ LOGO_PATH = "../assets/logo.png"
 BASE_LATEST = "https://www.cbr-xml-daily.ru/daily_json.js"
 BASE_ARCHIVE = "https://www.cbr-xml-daily.ru/archive"
 
+HTTP_POOL_SIZE = int(os.getenv("HTTP_POOL_SIZE", 10))
 SESSION = requests.Session()
 retry_strategy = Retry(
     total=3,
@@ -90,8 +90,10 @@ retry_strategy = Retry(
     status_forcelist=(429, 500, 502, 503, 504),
     allowed_methods=("GET",)
 )
-SESSION.mount("https://", HTTPAdapter(max_retries=retry_strategy))
-SESSION.headers.update({"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) cbr-client/1.0"})
+adapter = HTTPAdapter(pool_connections=HTTP_POOL_SIZE, pool_maxsize=HTTP_POOL_SIZE, max_retries=retry_strategy)
+SESSION.mount("https://", adapter)
+SESSION.mount("http://", adapter)
+SESSION.headers.update({"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/142.0.0.0 Safari/537.36"})
 
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
 GEMINI_MODEL = "gemini-2.5-flash"
