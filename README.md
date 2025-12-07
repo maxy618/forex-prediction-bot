@@ -1,8 +1,9 @@
 # forex-prediction-bot
 
-A simple Telegram bot and lightweight toolkit for experimenting with short-term exchange-rate forecasts using an ensemble of small models (Markov chains for direction + lagged linear regression for magnitude).
+A compact, experimental Telegram bot and a small toolkit for short-horizon exchange-rate forecasting. The project is intentionally simple — it uses an ensemble of
+small models: Markov chains to predict direction (sign) and lagged linear regression to predict magnitude.
 
-This repository contains the data pipeline, model training utilities, plotting helpers and the Telegram bot controller used for testing and interactive forecasts.
+This repository includes the data pipeline, training utilities, plotting helpers and a Telegram UI for interactive testing.
 
 📘 Русская версия: `README_RU.md`
 
@@ -13,7 +14,7 @@ This repository contains the data pipeline, model training utilities, plotting h
 - Purpose: provide a compact research / demo project for short-horizon currency rate predictions and a Telegram-based UI for quick interactive forecasts.
 - Approach: direction predicted with small-order Markov chains over sign sequences; magnitude predicted with simple lagged linear regressions. The final forecast is an ensemble of those components.
 
-Use-cases: research experiments, rapid prototyping or learning how simple forecasting pipelines can be composed into a small interactive bot.
+Use-cases: rapid prototyping, research experiments or learning how simple forecasting pipelines can be composed into an interactive bot.
 
 ---
 
@@ -23,7 +24,7 @@ Use-cases: research experiments, rapid prototyping or learning how simple foreca
 - Data parsing utilities for daily rates (CSV-based dataset in `datasets/`) and helper functions to fetch/parsers historical JSON sources
 - Training routines that persist Markov and regression models to `models/`
 - Plotting + convenient PNG exports for visual inspection (`temp/`)
-- A minimal Telegram bot (`src/main.py`) for interactive predictions using trained models
+- A minimal Telegram bot (startup in `src/main.py` → runtime handlers in `src/telegram_bot.py`) for interactive predictions using trained models
 
 ---
 
@@ -62,11 +63,15 @@ On the first run the code will train and save model files under `models/` if `RE
 
 ---
 
-## Files & layout
+## Key code paths
 
-Key paths you will work with:
+The relevant code is split into a few focused modules under `src/`:
 
-- `src/` — main bot code and utilities (including `.env` loader and training helpers)
+- `src/main.py` — small orchestrator: trains models on first run (if enabled) and launches the Telegram runtime via `telegram_bot.telegram_main(config)`.
+- `src/telegram_bot.py` — Telegram handlers, UI and per-chat state (runtime logic).
+- `src/parser.py` — HTTP session and fetching helpers used to collect historical rates.
+- `src/model_engine.py` — modeling code: Markov helpers, regression helpers and save/load functions.
+- `src/plotter.py` — plotting helpers for PNG previews used by the bot.
 - `datasets/` — CSV files with historical daily prices (source files used for training)
 - `models/` — saved model artifacts (Markov & regression pickles / safetensors)
 - `temp/` — generated PNG plots used by the bot
@@ -106,7 +111,7 @@ Model artifact naming convention (examples):
 
 ---
 
-## Configuration
+## Configuration & environment
 
 Defaults live in `src/main.py` as `MODELS_SETTINGS`. Typical options:
 
@@ -115,14 +120,21 @@ Defaults live in `src/main.py` as `MODELS_SETTINGS`. Typical options:
 - `markov.k` — add-k smoothing value
 - `reg.min_n / max_n` — lags range for regressions
 
-Adjust these values while developing; training cost is small for short ranges.
+Adjust these values while developing; training cost is small for the short ranges used by this demo.
 
 ---
 
-## Development notes
+## Developer notes
 
 - This project is intentionally compact and educational — models are simple and not production-ready.
-- Useful improvements: regularized regression, probabilistic calibration, richer features (volatility, volumes), better ensemble logic and test coverage.
+Suggested improvements: regularized regression, probabilistic calibration, richer features (e.g., volatility, volumes), improved ensemble logic and test coverage.
+
+If you plan to extend the project:
+
+- Add a dataset: drop a CSV into `datasets/` (see Data format) and rebuild models.
+- Modify runtime behavior: update `src/telegram_bot.py` and adjust config in `src/main.py`.
+
+I can also add a small example (adding a dataset + training) or tests if you want — tell me which you'd prefer next.
 
 ---
 
