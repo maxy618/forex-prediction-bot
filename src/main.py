@@ -47,6 +47,9 @@ MODELS_SETTINGS = {
     }
 }
 
+# cache TTL in seconds (default 5 minutes)
+CACHE_TTL = int(os.getenv("CACHE_TTL", 300))
+
 user_interface = {
     "captions": {
         "warning": "Прогноз — это лишь вероятность, а не гарантия. Используй результат как подсказку, а не как финансовый совет",
@@ -846,6 +849,22 @@ def call_gemini_advice(question_text: str, summary_text: str):
 
 def _perform_prediction_and_edit(bot, chat_id, message_id, user_id, first, second, days):
     logger.debug("_perform_prediction_and_edit called chat=%s user=%s pair=%s/%s days=%s", chat_id, user_id, first, second, days)
+    # clear old cache before computing a new forecast (safety)
+    try:
+        with _get_chat_lock(chat_id):
+            state = _get_chat_state(chat_id)
+            state.pop("cached_all_rates", None)
+            state.pop("cached_pair_key", None)
+            state.pop("forecasted_prices", None)
+            state.pop("forecasted_diffs", None)
+            state.pop("forecast_delta", None)
+            state.pop("advice_text", None)
+            state.pop("forecast_ts", None)
+            CHAT_STATE[chat_id] = state
+    except Exception:
+        # non-critical: log and continue
+        logger.exception("_perform_prediction_and_edit: failed to clear previous cache for chat=%s", chat_id)
+
     try:
         needed_days = max(MODELS_SETTINGS["reg"]["max_n"], MODELS_SETTINGS["markov"]["max_n"])
     except Exception as e:
@@ -945,6 +964,7 @@ def _perform_prediction_and_edit(bot, chat_id, message_id, user_id, first, secon
     kb = _make_rows([[ (user_interface["buttons"]["back_label"], "back:first"), (ask_label, ask_cb) ]])
     _edit_or_send_media(bot, chat_id, message_id, caption=f"{first}/{second}\n{advice}", media_path=out_path, reply_markup=kb)
 
+    # --- save cached data so follow-up question replies use the exact same prices
     state.update({
         "last_media": out_path,
         "first": first,
@@ -955,9 +975,16 @@ def _perform_prediction_and_edit(bot, chat_id, message_id, user_id, first, secon
         "forecasted_diffs": [float(x) for x in adjusted],
         "forecast_delta": float(delta),
         "advice_text": advice,
-        "forecast_ts": int(time.time())
+        "forecast_ts": int(time.time()),
+        "cached_all_rates": all_rates,
+        "cached_pair_key": pair_key
     })
-    CHAT_STATE[chat_id] = state
+    # persist state under lock
+    try:
+        with _get_chat_lock(chat_id):
+            CHAT_STATE[chat_id] = state
+    except Exception:
+        logger.exception("_perform_prediction_and_edit: failed to save chat state for chat=%s", chat_id)
 
     try:
         os.remove(out_path)
@@ -1021,9 +1048,14 @@ def cb_query(update, context):
 
     if cmd == "ask" and len(parts) == 4:
         _, first, second, days_str = parts
-        state = _get_chat_state(chat_id)
-        state.update({"awaiting_question": True})
-        CHAT_STATE[chat_id] = state
+        # set awaiting_question under lock
+        try:
+            with _get_chat_lock(chat_id):
+                state = _get_chat_state(chat_id)
+                state.update({"awaiting_question": True})
+                CHAT_STATE[chat_id] = state
+        except Exception:
+            logger.exception("cb_query: failed to set awaiting_question for chat=%s", chat_id)
         try:
             def try_edit_ask():
                 context.bot.edit_message_caption(chat_id=chat_id, message_id=message_id,
@@ -1037,9 +1069,13 @@ def cb_query(update, context):
         return
 
     if cmd == "cancel_ask":
-        state = _get_chat_state(chat_id)
-        state["awaiting_question"] = False
-        CHAT_STATE[chat_id] = state
+        try:
+            with _get_chat_lock(chat_id):
+                state = _get_chat_state(chat_id)
+                state["awaiting_question"] = False
+                CHAT_STATE[chat_id] = state
+        except Exception:
+            logger.exception("cb_query: failed to clear awaiting_question for chat=%s", chat_id)
 
         advice_text = state.get("advice_text")
         first = state.get("first")
@@ -1063,11 +1099,40 @@ def cb_query(update, context):
 
     if cmd == "back":
         if len(parts) >= 2 and parts[1] == "first":
+            # clear cached forecast data on back
+            try:
+                with _get_chat_lock(chat_id):
+                    state = _get_chat_state(chat_id)
+                    state.pop("cached_all_rates", None)
+                    state.pop("cached_pair_key", None)
+                    state.pop("forecasted_prices", None)
+                    state.pop("forecasted_diffs", None)
+                    state.pop("forecast_delta", None)
+                    state.pop("advice_text", None)
+                    state.pop("forecast_ts", None)
+                    state["awaiting_question"] = False
+                    CHAT_STATE[chat_id] = state
+            except Exception:
+                logger.exception("cb_query.back:first: failed to clear cache for chat=%s", chat_id)
             _replace_with_logo(context.bot, chat_id, message_id, caption=user_interface["captions"]["choose_first"], reply_markup=_kb_first())
             return
 
         if len(parts) >= 3 and parts[1] == "second":
             first = parts[2]
+            try:
+                with _get_chat_lock(chat_id):
+                    state = _get_chat_state(chat_id)
+                    state.pop("cached_all_rates", None)
+                    state.pop("cached_pair_key", None)
+                    state.pop("forecasted_prices", None)
+                    state.pop("forecasted_diffs", None)
+                    state.pop("forecast_delta", None)
+                    state.pop("advice_text", None)
+                    state.pop("forecast_ts", None)
+                    state["awaiting_question"] = False
+                    CHAT_STATE[chat_id] = state
+            except Exception:
+                logger.exception("cb_query.back:second: failed to clear cache for chat=%s", chat_id)
             _replace_with_logo(context.bot, chat_id, message_id, caption=f"Первая валюта: {first}\n{user_interface["captions"]["choose_second"]}", reply_markup=_kb_second(first))
             return
 
@@ -1083,12 +1148,13 @@ def question_message_handler(update, context):
     if not text:
         return
 
-    state = _get_chat_state(chat_id)
-    if not state.get("awaiting_question"):
-        return
-
-    state["awaiting_question"] = False
-    CHAT_STATE[chat_id] = state
+    # mark awaiting_question -> False under lock (thread-safe)
+    with _get_chat_lock(chat_id):
+        state = _get_chat_state(chat_id)
+        if not state.get("awaiting_question"):
+            return
+        state["awaiting_question"] = False
+        CHAT_STATE[chat_id] = state
 
     try:
         context.bot.delete_message(chat_id=chat_id, message_id=user_msg_id)
@@ -1105,8 +1171,30 @@ def question_message_handler(update, context):
         second = state.get("second")
         days = int(state.get("days", 1))
         try:
-            all_rates = fetch_sequences_all_pairs(CURRENCIES, days=max(MODELS_SETTINGS["reg"]["max_n"], MODELS_SETTINGS["markov"]["max_n"]))
+            first = state.get("first")
+            second = state.get("second")
+            days = int(state.get("days", 1))
+
+            # try to use cached values first
+            cached_all = state.get("cached_all_rates")
+            cached_key = state.get("cached_pair_key")
+            ts = state.get("forecast_ts")
+            now_ts = int(time.time())
+
             pair_key = f"{second}_per_{first}"
+            use_cached = False
+            if cached_all and cached_key and ts:
+                if cached_key == pair_key and (now_ts - int(ts)) <= CACHE_TTL:
+                    use_cached = True
+                else:
+                    # cache expired or pair mismatch
+                    logger.debug("question_message_handler: cache invalid or expired for chat=%s (key=%s ts=%s now=%s) expected=%s", chat_id, cached_key, ts, now_ts, pair_key)
+
+            if use_cached:
+                all_rates = cached_all
+            else:
+                all_rates = fetch_sequences_all_pairs(CURRENCIES, days=max(MODELS_SETTINGS["reg"]["max_n"], MODELS_SETTINGS["markov"]["max_n"]))
+
             dates = sorted(all_rates.keys())
             prices = [float(all_rates[d][pair_key]) for d in dates]
         except Exception as e:
@@ -1154,12 +1242,18 @@ def question_message_handler(update, context):
     else:
         final_caption = "Ассистент не смог предоставить ответ (ошибка подключения к модели)."
 
-    qa_history = state.get("qa_history", [])
-    qa_history.append({"q": text, "a": final_caption})
-    qa_history = qa_history[-5:]
-    state["qa_history"] = qa_history
-    state["asked_count"] = state.get("asked_count", 0) + 1
-    CHAT_STATE[chat_id] = state
+    # update qa history and counters under lock
+    try:
+        with _get_chat_lock(chat_id):
+            state = _get_chat_state(chat_id)
+            qa_history = state.get("qa_history", [])
+            qa_history.append({"q": text, "a": final_caption})
+            qa_history = qa_history[-5:]
+            state["qa_history"] = qa_history
+            state["asked_count"] = state.get("asked_count", 0) + 1
+            CHAT_STATE[chat_id] = state
+    except Exception:
+        logger.exception("question_message_handler: failed to update QA history for chat=%s", chat_id)
 
     first = state.get("first")
     second = state.get("second")
