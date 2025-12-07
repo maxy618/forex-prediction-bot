@@ -19,8 +19,13 @@ from logging_util import setup_logging, exception_rid
 logger = setup_logging(level="debug", name=__name__)
 
 from matplotlib import use
-use("Agg")
-import matplotlib.pyplot as plt
+from model_engine import (
+    save_model, load_model,
+    counts_to_probabilities, build_markov_model, predict_state, predict_ensemble_sign, forecast_signs,
+    build_regression, predict_diff, predict_ensemble_diff, forecast_diffs,
+)
+
+from plotter import plot_sequence
 
 import threading
 from telegram import Bot, InlineKeyboardButton, InlineKeyboardMarkup, InputMediaPhoto
@@ -160,171 +165,11 @@ def read_column(column_name, csv_path):
 # ==============================
 # MARKOV CHAIN
 # ==============================
-def counts_to_probabilities(counter, k=MODELS_SETTINGS["markov"]["k"]):
-    laplace_smoothing = lambda m, n, k, v: (m + k) / (n + k * v)
-    n = sum(counter.values())
-    v = len(counter)
-    
-    probs = {}
-    for key, count in counter.items():
-        p = laplace_smoothing(count, n, k, v)
-        probs[key] = p
-    
-    return probs
-
-
-def build_markov_model(sequence, order=1):
-    logger.debug("build_markov_model called sequence_len=%s order=%s", len(sequence), order)
-    if order >= len(sequence):
-        raise ValueError("sequence length should be > order")
-    
-    counters = defaultdict(Counter)
-    
-    for idx in range(len(sequence) - order):
-        current_state = tuple(sequence[idx:idx+order])
-        next_state = sequence[idx+order]
-        counters[current_state][next_state] += 1
-    
-    model = {}
-    for state, counter in counters.items():
-        model[state] = counts_to_probabilities(counter)
-    
-    model = {
-        "order": order,
-        "table": model
-        }
-    
-    logger.debug("build_markov_model finished order=%s states=%d", order, len(model))
-    return model
-
-
-def predict_state(sequence, model):
-    order = model["order"]
-    table = model["table"]
-
-    if len(sequence) < order:
-        raise ValueError("sequence length should be >= order")
-
-    current_state = tuple(sequence[-order:])
-
-    next_states = table.get(current_state)
-    if next_states is None:
-        return None
-
-    rand_num = random.random()
-    cumul_sum = 0
-
-    for sign, prob in next_states.items():
-        cumul_sum += prob
-        if rand_num <= cumul_sum:
-            return sign
-
-    winner = max(next_states, key=next_states.get)
-    return winner
-
-
-def predict_ensemble_sign(sequence, models):
-    votes = {"+": 0, "-": 0}
-    for model in models:
-        next_state = predict_state(sequence, model)
-        if next_state is None:
-            continue
-        votes[next_state] += 1
-    
-    max_votes = max(votes.values())
-    leaders = [k for k, v in votes.items() if v == max_votes]
-    choice = random.choice(leaders)
-    return choice
-
-
-def forecast_signs(sequence, models, n=1):
-    logger.debug("forecast_signs called seq_len=%s models=%s n=%s", len(sequence), len(models), n)
-    result = []
-    curr_seq = sequence.copy()
-    
-    for _ in range(n):
-        next_state = predict_ensemble_sign(curr_seq, models)
-        result.append(next_state)
-        curr_seq.append(next_state)
-    
-    logger.debug("forecast_signs finished produced=%s", result)
-    return result
-
 
 # ==============================
 # REGRESSION
 # ==============================
-def build_regression(diffs_list, n_lags=1):
-    logger.debug("build_regression called len=%s n_lags=%s", len(diffs_list), n_lags)
-    if len(diffs_list) <= n_lags:
-        raise ValueError(f"diffs_list length should be > n_lags")  
-    
-    x = []
-    y = []
-    for i in range(n_lags, len(diffs_list)):
-        prev_diffs = diffs_list[i - n_lags:i]
-        curr_diff  = diffs_list[i]
-        x.append(prev_diffs)
-        y.append(curr_diff)
-
-    X_mat = np.array(x, dtype=float)
-    y_vec = np.array(y, dtype=float).reshape(-1, 1)
-
-    ones = np.ones((X_mat.shape[0], 1))
-    X_with_bias = np.hstack([X_mat, ones])
-
-    Xt = X_with_bias.T
-    XtX = Xt @ X_with_bias
-    Xty = Xt @ y_vec
-
-    coeffs = np.linalg.inv(XtX) @ Xty
-
-    coeffs_out = coeffs.flatten()
-    logger.debug("build_regression finished coeffs_len=%s", len(coeffs_out))
-    return coeffs_out
-
-
-def predict_diff(last_diffs, coeffs):
-    n_lags = len(coeffs) - 1
-    
-    if len(last_diffs) < n_lags:
-        raise ValueError("last_diffs length is smaller than required n_lags")
-    
-    weights = coeffs[:-1]
-    bias = coeffs[-1]
-
-    inputs = last_diffs[-n_lags:]
-
-    prediction = 0
-    for i in range(n_lags):
-        prediction += weights[i] * inputs[i]
-    prediction += bias
-
-    return prediction
-
-
-def predict_ensemble_diff(last_diffs, models):
-    results = []
-    for coeffs in models:
-        res = predict_diff(last_diffs, coeffs)
-        results.append(res)
-    
-    avg = sum(results) / len(results)
-    return avg
-
-
-def forecast_diffs(last_diffs, models, n=1):
-    logger.debug("forecast_diffs called last_diffs_len=%s models=%s n=%s", len(last_diffs), len(models), n)
-    result = []
-    diffs = last_diffs.copy()
-
-    for _ in range(n):
-        next_diff = predict_ensemble_diff(diffs, models)
-        result.append(next_diff)
-        diffs.append(next_diff)
-
-    logger.debug("forecast_diffs finished produced=%s", result)
-    return result
+# model logic (Markov + regression) moved to src/model_engine.py
 
 
 # ==============================
@@ -446,70 +291,7 @@ def fetch_sequences_all_pairs(currencies, days=max(MODELS_SETTINGS["markov"]["ma
 # ==============================
 # PLOTTER
 # ==============================
-def make_axes_limits(prices):
-    logger.debug("make_axes_limits called len=%s", len(prices))
-    min_price = min(prices)
-    max_price = max(prices)
-    diff = max_price - min_price
-
-    if diff == 0:
-        diff = min_price * 0.01 if min_price != 0 else 1
-
-    low = min_price - diff * 0.5
-    high = max_price + diff * 0.5
-
-    logger.debug("make_axes_limits returned low=%s high=%s", low, high)
-    return low, high
-
-
-def plot_sequence(old_prices, new_prices, filename):
-    logger.debug("plot_sequence called old_len=%s new_len=%s filename=%s", len(old_prices), len(new_prices), filename)
-    all_prices = old_prices + new_prices
-    if not all_prices:
-        raise ValueError("no prices to plot")
-
-    y_min, y_max = make_axes_limits(all_prices)
-
-    color_new = "green" if new_prices and new_prices[-1] > old_prices[-1] else "red"
-
-    m = len(old_prices)
-    n = len(new_prices)
-    total = m + n
-
-    start_date = date.today() - timedelta(days=max(0, m - 1))
-    dates = [start_date + timedelta(days=i) for i in range(total)]
-    labels = [d.strftime("%d.%m") for d in dates]
-
-    plt.figure(figsize=(5, 3), facecolor="black")
-    ax = plt.gca()
-    ax.set_facecolor("black")
-
-    ax.spines["top"].set_visible(False)
-    ax.spines["right"].set_visible(False)
-    ax.spines["left"].set_visible(False)
-    ax.spines["bottom"].set_visible(False)
-
-    ax.tick_params(colors="white", labelsize=8)
-    plt.ylim(y_min, y_max)
-
-    old_x = list(range(m))
-    plt.plot(old_x, old_prices, color="white", linewidth=2)
-
-    if n > 0:
-        new_x = list(range(m - 1, total))
-        new_y = [old_prices[-1]] + new_prices
-        plt.plot(new_x, new_y, color=color_new, linewidth=2)
-
-    plt.xticks(ticks=list(range(total)), labels=labels, rotation=45, fontsize=7)
-    plt.tight_layout()
-
-    out_dir = os.path.dirname(filename) or "."
-    os.makedirs(out_dir, exist_ok=True)
-    plt.savefig(filename, bbox_inches="tight", facecolor="black")
-    plt.close()
-
-    logger.debug("plot_sequence saved filename=%s", filename)
-    return filename
+# plotting helpers moved to src/plotter.py
 
 
 # ==============================
