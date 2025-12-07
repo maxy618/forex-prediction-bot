@@ -1277,7 +1277,7 @@ def question_message_handler(update, context):
 
 def telegram_main():
     logger.debug("telegram_main starting")
-    req = Request(connect_timeout=30, read_timeout=30)
+    req = Request(con_pool_size=HTTP_POOL_SIZE, connect_timeout=30, read_timeout=30)
     bot = Bot(token=TELEGRAM_TOKEN, request=req)
     updater = Updater(bot=bot, use_context=True)
     dp = updater.dispatcher
