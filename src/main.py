@@ -16,13 +16,15 @@ from dotenv import load_dotenv
 load_dotenv()
 
 from logging_util import setup_logging, exception_rid
-logger = setup_logging(name=__name__)
+logger = setup_logging(level="debug", name=__name__)
 
 from matplotlib import use
 use("Agg")
 import matplotlib.pyplot as plt
 
+import threading
 from telegram import Bot, InlineKeyboardButton, InlineKeyboardMarkup, InputMediaPhoto
+from telegram.error import BadRequest
 from telegram.ext import Updater, CommandHandler, CallbackQueryHandler, MessageHandler, Filters
 from telegram.utils.request import Request
 
@@ -125,19 +127,24 @@ Advice (bot): стоит покупать — прогноз роста
 # UTILS
 # ==============================
 def save_model(model, path_to_model):
+    logger.debug("save_model called path_to_model=%s model_type=%s", path_to_model, type(model).__name__)
     with open(path_to_model, 'wb') as file:
         pickle.dump(model, file)
+    logger.debug("save_model finished path_to_model=%s", path_to_model)
 
 
 def load_model(path_to_model):
+    logger.debug("load_model called path=%s", path_to_model)
     if not os.path.exists(path_to_model):
         raise FileNotFoundError(f"{path_to_model} does not exist")
     with open(path_to_model, 'rb') as file:
         model = pickle.load(file)
+        logger.debug("load_model finished path=%s type=%s", path_to_model, type(model).__name__)
         return model
 
 
 def read_column(column_name, csv_path):
+    logger.debug("read_column called column=%s csv_path=%s", column_name, csv_path)
     values = []
     with open(csv_path, newline='', encoding='utf-8') as csvfile:
         reader = csv.DictReader(csvfile)
@@ -163,6 +170,7 @@ def counts_to_probabilities(counter, k=MODELS_SETTINGS["markov"]["k"]):
 
 
 def build_markov_model(sequence, order=1):
+    logger.debug("build_markov_model called sequence_len=%s order=%s", len(sequence), order)
     if order >= len(sequence):
         raise ValueError("sequence length should be > order")
     
@@ -182,6 +190,7 @@ def build_markov_model(sequence, order=1):
         "table": model
         }
     
+    logger.debug("build_markov_model finished order=%s states=%d", order, len(model))
     return model
 
 
@@ -206,7 +215,8 @@ def predict_state(sequence, model):
         if rand_num <= cumul_sum:
             return sign
 
-    return max(next_states, key=next_states.get)
+    winner = max(next_states, key=next_states.get)
+    return winner
 
 
 def predict_ensemble_sign(sequence, models):
@@ -219,10 +229,12 @@ def predict_ensemble_sign(sequence, models):
     
     max_votes = max(votes.values())
     leaders = [k for k, v in votes.items() if v == max_votes]
-    return random.choice(leaders)
+    choice = random.choice(leaders)
+    return choice
 
 
 def forecast_signs(sequence, models, n=1):
+    logger.debug("forecast_signs called seq_len=%s models=%s n=%s", len(sequence), len(models), n)
     result = []
     curr_seq = sequence.copy()
     
@@ -231,6 +243,7 @@ def forecast_signs(sequence, models, n=1):
         result.append(next_state)
         curr_seq.append(next_state)
     
+    logger.debug("forecast_signs finished produced=%s", result)
     return result
 
 
@@ -238,6 +251,7 @@ def forecast_signs(sequence, models, n=1):
 # REGRESSION
 # ==============================
 def build_regression(diffs_list, n_lags=1):
+    logger.debug("build_regression called len=%s n_lags=%s", len(diffs_list), n_lags)
     if len(diffs_list) <= n_lags:
         raise ValueError(f"diffs_list length should be > n_lags")  
     
@@ -261,7 +275,9 @@ def build_regression(diffs_list, n_lags=1):
 
     coeffs = np.linalg.inv(XtX) @ Xty
 
-    return coeffs.flatten()
+    coeffs_out = coeffs.flatten()
+    logger.debug("build_regression finished coeffs_len=%s", len(coeffs_out))
+    return coeffs_out
 
 
 def predict_diff(last_diffs, coeffs):
@@ -289,10 +305,12 @@ def predict_ensemble_diff(last_diffs, models):
         res = predict_diff(last_diffs, coeffs)
         results.append(res)
     
-    return sum(results) / len(results)
+    avg = sum(results) / len(results)
+    return avg
 
 
 def forecast_diffs(last_diffs, models, n=1):
+    logger.debug("forecast_diffs called last_diffs_len=%s models=%s n=%s", len(last_diffs), len(models), n)
     result = []
     diffs = last_diffs.copy()
 
@@ -301,6 +319,7 @@ def forecast_diffs(last_diffs, models, n=1):
         result.append(next_diff)
         diffs.append(next_diff)
 
+    logger.debug("forecast_diffs finished produced=%s", result)
     return result
 
 
@@ -308,6 +327,7 @@ def forecast_diffs(last_diffs, models, n=1):
 # PARSER
 # ==============================
 def get_dates_list(num_days):
+    logger.debug("get_dates_list called num_days=%s", num_days)
     today = date.today()
     start = today - timedelta(days=num_days-1)
     
@@ -316,10 +336,12 @@ def get_dates_list(num_days):
     while day <= today:
         res.append(day)
         day += timedelta(days=1)
+    logger.debug("get_dates_list finished len=%s start=%s end=%s", len(res), res[0] if res else None, res[-1] if res else None)
     return res
 
 
 def fetch_for_date(d, base_latest, base_archive):
+    logger.debug("fetch_for_date called date=%s", d)
     if d == date.today():
         url = base_latest
     else:
@@ -328,7 +350,9 @@ def fetch_for_date(d, base_latest, base_archive):
         r = SESSION.get(url, timeout=6)
         if r.status_code == 200:
             try:
-                return r.json()
+                json_res = r.json()
+                logger.debug("fetch_for_date success url=%s keys=%s", url, list(json_res.keys())[:5])
+                return json_res
             except ValueError as e:
                 logger.warning("fetch_for_date: invalid json for %s: %s", url, e)
     except Exception as e:
@@ -338,7 +362,9 @@ def fetch_for_date(d, base_latest, base_archive):
         r = SESSION.get(url, timeout=6)
         if r.status_code == 200:
             try:
-                return r.json()
+                json_res = r.json()
+                logger.debug("fetch_for_date retry success url=%s keys=%s", url, list(json_res.keys())[:5])
+                return json_res
             except ValueError:
                 pass
     except Exception as e:
@@ -353,10 +379,12 @@ def fetch_for_date(d, base_latest, base_archive):
                     logger.warning("fetch_for_date: invalid json for base_latest %s: %s", base_latest, e)
         except Exception as e:
             logger.exception("fetch_for_date: fallback request failed for %s", base_latest)
+    logger.debug("fetch_for_date finished returning None for date=%s", d)
     return None
 
 
 def rub_per_one_from_json(js, code):
+    logger.debug("rub_per_one_from_json called code=%s present=%s", code, bool(js and "Valute" in js))
     if code == "RUB":
         return 1.0
     if not js or "Valute" not in js:
@@ -366,10 +394,12 @@ def rub_per_one_from_json(js, code):
         return None
     nominal = int(info.get("Nominal", 1))
     value = float(info.get("Value"))
+    logger.debug("rub_per_one_from_json for code=%s value=%s nominal=%s result=%s", code, value, nominal, value/nominal)
     return value / nominal
 
 
 def fetch_sequences_all_pairs(currencies, days=max(MODELS_SETTINGS["markov"]["max_n"], MODELS_SETTINGS["reg"]["max_n"])):
+    logger.debug("fetch_sequences_all_pairs called currencies=%s days=%s", currencies, days)
     dates = get_dates_list(days)
     last_known = {c: None for c in currencies}
 
@@ -405,6 +435,7 @@ def fetch_sequences_all_pairs(currencies, days=max(MODELS_SETTINGS["markov"]["ma
                 day_rates[pair] = float(rate)
         res[d.isoformat()] = day_rates
 
+    logger.debug("fetch_sequences_all_pairs finished days=%s result_dates=%s", len(res), list(res.keys())[:3])
     return res
 
 
@@ -412,6 +443,7 @@ def fetch_sequences_all_pairs(currencies, days=max(MODELS_SETTINGS["markov"]["ma
 # PLOTTER
 # ==============================
 def make_axes_limits(prices):
+    logger.debug("make_axes_limits called len=%s", len(prices))
     min_price = min(prices)
     max_price = max(prices)
     diff = max_price - min_price
@@ -422,10 +454,12 @@ def make_axes_limits(prices):
     low = min_price - diff * 0.5
     high = max_price + diff * 0.5
 
+    logger.debug("make_axes_limits returned low=%s high=%s", low, high)
     return low, high
 
 
 def plot_sequence(old_prices, new_prices, filename):
+    logger.debug("plot_sequence called old_len=%s new_len=%s filename=%s", len(old_prices), len(new_prices), filename)
     all_prices = old_prices + new_prices
     if not all_prices:
         raise ValueError("no prices to plot")
@@ -470,29 +504,69 @@ def plot_sequence(old_prices, new_prices, filename):
     plt.savefig(filename, bbox_inches="tight", facecolor="black")
     plt.close()
 
+    logger.debug("plot_sequence saved filename=%s", filename)
     return filename
 
 
 # ==============================
 # TELEGRAM
+# ==============================
 CHAT_STATE = {}
+CHAT_LOCKS = {}
+
+
+def _get_chat_lock(chat_id):
+    logger.debug("_get_chat_lock called chat_id=%s", chat_id)
+    lock = CHAT_LOCKS.get(chat_id)
+    if lock is None:
+        lock = threading.Lock()
+        CHAT_LOCKS[chat_id] = lock
+    logger.debug("_get_chat_lock returning lock for chat_id=%s", chat_id)
+    return lock
+
+
+def _markup_repr(reply_markup):
+    """Return a lightweight normalized representation of InlineKeyboardMarkup
+       so we can compare whether reply_markup actually changed."""
+    if not reply_markup:
+        return None
+    try:
+        rows = []
+        for row in getattr(reply_markup, "inline_keyboard", []):
+            cols = []
+            for b in row:
+                cols.append((getattr(b, "text", None), getattr(b, "callback_data", None)))
+            rows.append(tuple(cols))
+        return tuple(rows)
+    except Exception:
+        logger.debug("_markup_repr failed to normalize reply_markup, returning str")
+        return str(reply_markup)
+
 
 def _temp_file(user_id):
+    logger.debug("_temp_file called user_id=%s", user_id)
     os.makedirs(TEMP_FOLDER, exist_ok=True)
-    return os.path.join(TEMP_FOLDER, f"{user_id}_{int(time.time()*1000)}.png")
+    out = os.path.join(TEMP_FOLDER, f"{user_id}_{int(time.time()*1000)}.png")
+    logger.debug("_temp_file returning %s", out)
+    return out
+
 
 def _kb_first():
-    # Use labels from user_interface to build first-currency buttons
+    logger.debug("_kb_first called")
     codes = user_interface["buttons"].get("currency_codes", CURRENCIES)
     return _make_rows([[(c, f"first:{c}") for c in codes]])
 
+
 def _kb_second(first):
+    logger.debug("_kb_second called first=%s", first)
     codes = user_interface["buttons"].get("currency_codes", CURRENCIES)
     buttons = [(c, f"second:{first}:{c}") for c in codes if c != first]
     buttons.append((user_interface["buttons"]["back_label"], "back:first"))
     return _make_rows([buttons])
 
+
 def _kb_days(first, second):
+    logger.debug("_kb_days called first=%s second=%s", first, second)
     rows = []
     row = []
     day_labels = user_interface["buttons"].get("days", [str(i) for i in range(1, 10)])
@@ -506,94 +580,135 @@ def _kb_days(first, second):
     rows.append([ (user_interface["buttons"]["back_label"], f"back:second:{first}") ])
     return _make_rows(rows)
 
+
 def _make_rows(pairs):
+    logger.debug("_make_rows called rows=%s", len(pairs))
     keyboard = []
     for row in pairs:
         keyboard.append([InlineKeyboardButton(text, callback_data=cb) for text, cb in row])
     return InlineKeyboardMarkup(keyboard)
 
+
 def _save_chat_state(chat_id, message_id, has_logo, **kwargs):
+    logger.debug("_save_chat_state called chat_id=%s message_id=%s has_logo=%s kwargs=%s", chat_id, message_id, has_logo, list(kwargs.keys()))
     state = CHAT_STATE.get(chat_id, {})
     state.update({"msg_id": int(message_id), "has_logo": bool(has_logo)})
     for k, v in kwargs.items():
         state[k] = v
     CHAT_STATE[chat_id] = state
 
+
 def _get_chat_state(chat_id):
+    logger.debug("_get_chat_state called chat_id=%s", chat_id)
     return CHAT_STATE.get(chat_id, {"msg_id": None, "has_logo": False, "awaiting_question": False})
 
+
 def _send_start_message(bot: Bot, chat_id: int):
+    logger.debug("_send_start_message called chat_id=%s", chat_id)
     if os.path.exists(LOGO_PATH):
         try:
             with open(LOGO_PATH, "rb") as f:
+                kb = InlineKeyboardMarkup(
+                    [[InlineKeyboardButton(user_interface["buttons"]["warning_label"], callback_data="do_predict")]]
+                )
                 msg = bot.send_photo(
                     chat_id=chat_id,
                     photo=f,
                     caption=user_interface["captions"]["warning"],
-                    reply_markup=InlineKeyboardMarkup(
-                        [[InlineKeyboardButton(user_interface["buttons"]["warning_label"], callback_data="do_predict")]]
-                    )
+                    reply_markup=kb
                 )
-            _save_chat_state(chat_id, msg.message_id, True)
+            _save_chat_state(chat_id, msg.message_id, True,
+                             last_caption=user_interface["captions"]["warning"],
+                             last_markup=_markup_repr(kb))
+            logger.debug("_send_start_message sent photo chat_id=%s message_id=%s", chat_id, msg.message_id)
             return msg
         except Exception as e:
             logger.exception("_send_start_message: failed to send photo to %s", chat_id)
+    kb = InlineKeyboardMarkup(
+        [[InlineKeyboardButton(user_interface["buttons"]["warning_label"], callback_data="do_predict")]]
+    )
     msg = bot.send_message(
         chat_id=chat_id,
         text=user_interface["captions"]["warning"],
-        reply_markup=InlineKeyboardMarkup(
-            [[InlineKeyboardButton(user_interface["captions"]["warning"], callback_data="do_predict")]]
-        )
+        reply_markup=kb
     )
-    _save_chat_state(chat_id, msg.message_id, False)
+    _save_chat_state(chat_id, msg.message_id, False,
+                     last_caption=user_interface["captions"]["warning"],
+                     last_markup=_markup_repr(kb))
+    logger.debug("_send_start_message sent text chat_id=%s message_id=%s", chat_id, msg.message_id)
     return msg
+
 
 def _edit_with_retries(action_callable, bot: Bot, chat_id: int, message_id: int,
                        max_attempts: int = 3, delay: float = 1.0):
+    logger.debug("_edit_with_retries called chat_id=%s message_id=%s max_attempts=%s", chat_id, message_id, max_attempts)
+    lock = _get_chat_lock(chat_id)
     last_exc = None
-    for attempt in range(1, max_attempts + 1):
-        try:
-            action_callable()
-            return True
-        except Exception as e:
-            last_exc = e
-            logger.exception("_edit_with_retries: attempt %s failed", attempt)
+    with lock:
+        for attempt in range(1, max_attempts + 1):
+            try:
+                action_callable()
+                return True
+            except BadRequest as be:
+                last_exc = be
+                msg = str(be)
+                # If message is not modified — nothing to do
+                if "Message is not modified" in msg:
+                    logger.debug("_edit_with_retries: ignored BadRequest 'Message is not modified' for chat=%s msg=%s", chat_id, message_id)
+                    return True
+                # If message not found — no point in retrying
+                if "Message to edit not found" in msg or "Message to delete not found" in msg or "message to edit not found" in msg.lower():
+                    logger.warning("_edit_with_retries: message to edit not found for chat=%s msg=%s", chat_id, message_id)
+                    break
+                logger.exception("_edit_with_retries: BadRequest attempt %s failed", attempt, exc_info=be)
+            except Exception as e:
+                last_exc = e
+                logger.exception("_edit_with_retries: attempt %s failed", attempt)
             if attempt < max_attempts:
                 time.sleep(delay)
-                continue
+
+    # final fallback: try to delete old message and inform user
     try:
         bot.delete_message(chat_id=chat_id, message_id=message_id)
-    except Exception as e:
+    except Exception:
         logger.exception("_edit_with_retries: failed to delete old message chat=%s msg=%s", chat_id, message_id)
     try:
         rid = exception_rid(logger, "_edit_with_retries: final failure", exc=last_exc)
         bot.send_message(chat_id=chat_id, text=f"{user_interface['captions']['unexpected_error']} (id: {rid})")
-    except Exception as e:
+    except Exception:
         logger.exception("_edit_with_retries: failed to send unexpected_error to chat=%s", chat_id)
     try:
         _send_start_message(bot, chat_id)
-    except Exception as e:
+    except Exception:
         logger.exception("_edit_with_retries: failed to resend start message to chat=%s", chat_id)
     return False
 
+
 def start_handler(update, context):
+    logger.debug("start_handler called chat=%s", getattr(update, 'effective_chat', None) and update.effective_chat.id)
     chat_id = update.effective_chat.id
     kb = InlineKeyboardMarkup([[InlineKeyboardButton(user_interface["buttons"]["warning_label"], callback_data="do_predict")]])
     if os.path.exists(LOGO_PATH):
         try:
             with open(LOGO_PATH, "rb") as f:
                 msg = context.bot.send_photo(chat_id=chat_id, photo=f, caption=user_interface["captions"]["warning"], reply_markup=kb)
-            _save_chat_state(chat_id, msg.message_id, True)
+            _save_chat_state(chat_id, msg.message_id, True,
+                             last_caption=user_interface["captions"]["warning"],
+                             last_markup=_markup_repr(kb))
             return
         except Exception as e:
             logger.exception("start_handler: failed to send photo to %s", chat_id)
     try:
         msg = context.bot.send_message(chat_id=chat_id, text=user_interface["captions"]["warning"], reply_markup=kb)
-        _save_chat_state(chat_id, msg.message_id, False)
+        _save_chat_state(chat_id, msg.message_id, False,
+                 last_caption=user_interface["captions"]["warning"],
+                 last_markup=_markup_repr(kb))
     except Exception as e:
         logger.exception("start_handler: failed to send warning message to %s", chat_id)
 
+
 def _replace_with_logo(bot, chat_id, message_id, caption=None, reply_markup=None, max_attempts=3, delay=1.0):
+    logger.debug("_replace_with_logo called chat=%s message_id=%s caption_len=%s", chat_id, message_id, len(caption) if caption else 0)
     state = _get_chat_state(chat_id)
     if state["has_logo"]:
         def try_edit_caption():
@@ -621,7 +736,9 @@ def _replace_with_logo(bot, chat_id, message_id, caption=None, reply_markup=None
         _save_chat_state(chat_id, message_id, False)
     return
 
+
 def _edit_or_send_media(bot, chat_id, message_id, caption=None, media_path=None, reply_markup=None, max_attempts=3, delay=1.0):
+    logger.debug("_edit_or_send_media called chat=%s message_id=%s media_path=%s reply_markup=%s", chat_id, message_id, media_path, bool(reply_markup))
     if media_path and os.path.exists(media_path):
         def try_edit_media():
             with open(media_path, "rb") as f:
@@ -638,17 +755,20 @@ def _edit_or_send_media(bot, chat_id, message_id, caption=None, media_path=None,
                 bot.delete_message(chat_id=chat_id, message_id=message_id)
             except Exception as e:
                 logger.exception("_edit_or_send_media: failed to delete old media message chat=%s msg=%s", chat_id, message_id)
-            _save_chat_state(chat_id, new_msg.message_id, False)
+            _save_chat_state(chat_id, new_msg.message_id, False,
+                             last_caption=caption or "",
+                             last_markup=_markup_repr(reply_markup))
             return
         except Exception as e:
             logger.exception("_edit_or_send_media: send media failed for chat=%s path=%s", chat_id, media_path)
             try:
-                new_msg = bot.send_message(chat_id=chat_id, text=caption or "", reply_markup=reply_markup)
                 try:
                     bot.delete_message(chat_id=chat_id, message_id=message_id)
                 except Exception as e:
                     logger.exception("_edit_or_send_media: failed to delete old message on fallback chat=%s msg=%s", chat_id, message_id)
-                _save_chat_state(chat_id, new_msg.message_id, False)
+                _save_chat_state(chat_id, new_msg.message_id, False,
+                                 last_caption=caption or "",
+                                 last_markup=_markup_repr(reply_markup))
                 return
             except Exception as e:
                 logger.exception("_edit_or_send_media: fully failed to send for chat=%s", chat_id)
@@ -676,7 +796,9 @@ def _edit_or_send_media(bot, chat_id, message_id, caption=None, media_path=None,
             return
         return
 
+
 def call_gemini_advice(question_text: str, summary_text: str):
+    logger.debug("call_gemini_advice called question_len=%s summary_len=%s", len(question_text or ""), len(summary_text or ""))
     prompt = PROMPT_TEMPLATE + summary_text + "\n\nUser question:\n" + question_text + "\n\nОтвет:"
     payload = {
         "contents": [
@@ -698,7 +820,9 @@ def call_gemini_advice(question_text: str, summary_text: str):
         return None
 
     try:
-        return j["candidates"][0]["content"]["parts"][0]["text"].strip()
+        found = j["candidates"][0]["content"]["parts"][0]["text"].strip()
+        logger.debug("call_gemini_advice returned len=%s", len(found))
+        return found
     except Exception as e:
         def walk(o):
             if isinstance(o, str):
@@ -720,7 +844,9 @@ def call_gemini_advice(question_text: str, summary_text: str):
         logger.warning("call_gemini_advice: no text found in response")
         return None
 
+
 def _perform_prediction_and_edit(bot, chat_id, message_id, user_id, first, second, days):
+    logger.debug("_perform_prediction_and_edit called chat=%s user=%s pair=%s/%s days=%s", chat_id, user_id, first, second, days)
     try:
         needed_days = max(MODELS_SETTINGS["reg"]["max_n"], MODELS_SETTINGS["markov"]["max_n"])
     except Exception as e:
@@ -839,14 +965,22 @@ def _perform_prediction_and_edit(bot, chat_id, message_id, user_id, first, secon
     except Exception as e:
         logger.exception("_perform_prediction_and_edit: failed to remove temp file %s", out_path)
 
+
 def cb_query(update, context):
+    logger.debug("cb_query called user=%s data=%s", getattr(update.callback_query, 'from_user', None), getattr(update.callback_query, 'data', None))
     query = update.callback_query
     data = (query.data or "").strip()
     user_id = update.effective_user.id
     chat_id = query.message.chat.id
     message_id = query.message.message_id
 
-    query.answer()
+    try:
+        query.answer(cache_time=2)
+    except Exception:
+        try:
+            query.answer()
+        except Exception:
+            pass
 
     parts = data.split(":")
     cmd = parts[0]
@@ -940,7 +1074,9 @@ def cb_query(update, context):
 
     query.answer(text="Неизвестная команда", show_alert=False)
 
+
 def question_message_handler(update, context):
+    logger.debug("question_message_handler called user=%s chat=%s", getattr(update, 'effective_user', None), getattr(update.message, 'chat', None) and update.message.chat.id)
     msg = update.message
     chat_id = msg.chat.id
     user_msg_id = msg.message_id
@@ -1011,6 +1147,7 @@ def question_message_handler(update, context):
         summary_text = "Chart data: unavailable.\n"
 
     gemini_resp = call_gemini_advice(text, summary_text)
+    logger.debug("question_message_handler got gemini_resp_len=%s", len(gemini_resp or ""))
 
     final_caption = None
     if gemini_resp:
@@ -1042,7 +1179,9 @@ def question_message_handler(update, context):
         except Exception as e:
             logger.exception("question_message_handler: failed to send message to chat=%s", chat_id)
 
+
 def telegram_main():
+    logger.debug("telegram_main starting")
     req = Request(connect_timeout=30, read_timeout=30)
     bot = Bot(token=TELEGRAM_TOKEN, request=req)
     updater = Updater(bot=bot, use_context=True)
@@ -1052,11 +1191,14 @@ def telegram_main():
     dp.add_handler(MessageHandler(Filters.text & (~Filters.command), question_message_handler))
     updater.start_polling()
     updater.idle()
+    logger.debug("telegram_main stopped")
 
 
 # ==============================
 # MAIN
+# ==============================
 def train_models_if_needed(markov_min_n, markov_max_n, reg_min_n, reg_max_n):
+    logger.debug("train_models_if_needed called markov_min=%s markov_max=%s reg_min=%s reg_max=%s", markov_min_n, markov_max_n, reg_min_n, reg_max_n)
     os.makedirs(MODELS_PATH, exist_ok=True)
     pairs = []
     for a in CURRENCIES:
