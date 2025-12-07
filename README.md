@@ -1,265 +1,135 @@
-📘 [Русская версия](README_RU.md)
+# forex-prediction-bot
 
-# Currency Exchange Rates Prediction Telegram Bot
+A simple Telegram bot and lightweight toolkit for experimenting with short-term exchange-rate forecasts using an ensemble of small models (Markov chains for direction + lagged linear regression for magnitude).
 
-> **TL;DR:** A small Telegram bot that forecasts currency exchange rates using an ensemble of Markov chains (direction prediction) and lagged linear regression (magnitude prediction). The repository contains the bot, data parsing, model training, and plotting utilities.
+This repository contains the data pipeline, model training utilities, plotting helpers and the Telegram bot controller used for testing and interactive forecasts.
 
----
-
-## Table of Contents
-
-* [Overview](#overview)
-* [Concept and algorithms (detailed)](#concept-and-algorithms-detailed)
-
-  * [Preprocessing and features](#preprocessing-and-features)
-  * [Markov chains — construction and smoothing](#markov-chains---construction-and-smoothing)
-  * [Laplace (add-k) smoothing — formula](#laplace-add-k-smoothing---formula)
-  * [Lagged linear regression — maths and numerics](#lagged-linear-regression---maths-and-numerics)
-  * [Ensembling rules and tie-breaking](#ensembling-rules-and-tie-breaking)
-* [Project structure](#project-structure)
-* [Data format (expanded)](#data-format-expanded)
-* [Local setup and run](#local-setup-and-run)
-* [Configuration and parameters](#configuration-and-parameters)
-* [Training and forecasting (implementation notes)](#training-and-forecasting-implementation-notes)
-* [Plotting and visualization details](#plotting-and-visualization-details)
-* [Parser and data-fetching robustness](#parser-and-data-fetching-robustness)
-* [Interpretation and limitations (technical)](#interpretation-and-limitations-technical)
-* [License](#license)
+📘 Русская версия: `README_RU.md`
 
 ---
 
-## Overview
+## Quick overview
 
-This repository implements a compact pipeline that:
+- Purpose: provide a compact research / demo project for short-horizon currency rate predictions and a Telegram-based UI for quick interactive forecasts.
+- Approach: direction predicted with small-order Markov chains over sign sequences; magnitude predicted with simple lagged linear regressions. The final forecast is an ensemble of those components.
 
-* fetches daily exchange rates (source: Central Bank of Russia JSON API),
-* constructs symbol-level price sequences for pairs such as `USD_per_EUR`, `EUR_per_RUB`, etc.,
-* computes daily differences and signs (up/down),
-* trains Markov chain models on sign sequences to estimate direction probabilities,
-* trains lagged linear regressions on differences to estimate the magnitude of the next change,
-* combines outputs from multiple models into an ensemble forecast and produces a compact plot for N days ahead,
-* exposes a Telegram bot UI for interactive predictions.
+Use-cases: research experiments, rapid prototyping or learning how simple forecasting pipelines can be composed into a small interactive bot.
 
 ---
 
-## Concept and algorithms (detailed)
+## Highlights & Features
 
-### Preprocessing and features
+- Small, readable codebase focused on clarity and experimentation
+- Data parsing utilities for daily rates (CSV-based dataset in `datasets/`) and helper functions to fetch/parsers historical JSON sources
+- Training routines that persist Markov and regression models to `models/`
+- Plotting + convenient PNG exports for visual inspection (`temp/`)
+- A minimal Telegram bot (`src/main.py`) for interactive predictions using trained models
 
-Input: a time-ordered series of daily prices `Price(t)`.
+---
 
-Compute:
+## Getting started (short)
 
-1. `diff(t) = |Price(t) - Price(t-1)|` — daily change (float).
-2. `sign(t) = '+' if diff(t) >= 0 else '-'` — discrete direction label.
+Requirements: Python 3.8+ and pip.
 
-Notes and edge cases:
+1) Create & activate a virtual environment
 
-* If there are missing calendar days in the CSV, adjacent rows are treated as consecutive trading points unless data is explicitly filled.
-* Zero diffs produce `-` in the current implementation (arbitrary tie-breaker).
-* Small floating rounding differences can flip a sign; be aware when interpreting short-term patterns.
+Windows (PowerShell):
 
-### Markov chains — construction and smoothing
-
-A Markov model of order `n` (n-gram over signs) estimates probabilities of the next symbol given the last `n` symbols.
-
-Implementation summary (function: `build_markov_model(sequence, order)`):
-
-* Iterate through the sign sequence and collect counts `counts[state][next]` where `state` is a tuple of `order` previous signs.
-* Convert counts to probabilities with an add-`k` smoothing function (implemented in `counts_to_probabilities`).
-* The resulting model is `{ "order": n, "table": { state_tuple: { next_sign: probability, ... }, ... } }`.
-
-Predicting: the code picks the last `order` signs, looks them up in the table and samples the next sign according to the stored probabilities. If the state is absent, that model abstains from voting in the ensemble.
-
-Important implementation details:
-
-* If `order >= len(sequence)` the builder raises an error.
-* The `table` is a dict keyed by tuples.
-* Sampling is pseudo-random; a deterministic forecast can be obtained by selecting the most-probable sign.
-
-### Laplace (add-k) smoothing — formula
-
-Smoothing assigns non-zero mass to unseen transitions.
-
-Given observed counts `m_i` for each symbol `i`, let `n = sum_i m_i`, and `v` be the number of distinct next-symbol values. The smoothed probability for symbol `i` is:
-
-```
-P(i) = (m_i + k) / (n + k * v)
-```
-
-The code defines `k = MODELS_SETTINGS["markov"]["k"]` (default `0.2`).
-
-### Lagged linear regression — maths and numerics
-
-The regression model predicts the next `diff` using a linear combination of the previous `n_lags` diffs:
-
-```
-ŷ_t = w_1 * diff_{t-1} + w_2 * diff_{t-2} + ... + w_n * diff_{t-n} + b
-```
-
-Design matrix `X` rows: `[diff_{t-n}, ..., diff_{t-1}]`, target vector `y = diff_t`.
-
-Parameter estimation (function: `build_regression`):
-
-* Build `X_with_bias` by appending a column of ones to `X`.
-* Solve for coefficients; implementations may use normal equations or a numerically-stable alternative.
-
-Prediction (function: `predict_diff`) is `weights.dot(inputs) + bias`.
-
-### Ensembling rules and tie-breaking
-
-Ensemble composition in the repository:
-
-* **Sign (direction):** each Markov model votes for `+` or `-`. The ensemble selects the majority vote. Models with missing states abstain. Ties are resolved by random choice between tied leaders.
-* **Magnitude:** regression models return numeric diff predictions; the ensemble averages these numbers.
-* **Adjustment rule:** if the averaged regression magnitude has sign opposite to the Markov majority, the implementation applies the Markov sign to the magnitude (i.e. `sign * abs(magnitude)`).
-
-This README records the ensemble logic implemented in code (no additional fusion strategies are described here).
-
-## Project structure
-
-```
-forex-prediction-bot/
-├── src/
-│   ├── main.py         # Main script: bot logic, training and utilities
-│   └── .env            # (local) TELEGRAM_TOKEN
-├── datasets/           # CSV historical data (format below)
-├── models/             # Saved .pkl models (markov_..., regression_...)
-├── assets/             # static files (logo.png)
-├── temp/               # temporary images before sending
-├── requirements.txt    # dependencies
-└── README.md           # this file (English)
-```
-
-## Data format (expanded)
-
-Each CSV file in `datasets/` corresponds to a currency pair and should have a header. Minimal required column: `Price`.
-
-Canonical format (daily rows, oldest → newest):
-
-```csv
-Date,Price,Sign,Difference
-2005-04-04,35.938000,-,0.177000
-2005-04-05,35.790000,-,0.148000
-2005-04-06,35.845000,+,0.055000
-```
-
-Column descriptions:
-
-* `Date` — ISO date `YYYY-MM-DD`.
-* `Price` — numeric price/rate (float).
-* `Sign` — optional `+`/`-` token. If absent, `sign` can be computed from `Price`.
-* `Difference` — optional `Price_today - Price_yesterday` entry. If absent, recompute from `Price`.
-
-Preprocessing notes: trim leading NaNs and rows with malformed values. When combining sources, ensure consistent quoting direction and document file names (`USDEUR.csv` or `USD_EUR.csv`).
-
-## Local setup and run
-
-**Requirements:** Python 3.8+. `pip`.
-
-**Install dependencies:**
-
-```bash
+```powershell
 python -m venv venv
-# activate venv
-# Linux / macOS
-source venv/bin/activate
-# Windows
-venv\Scripts\activate
+venv\Scripts\Activate.ps1
+```
 
+2) Install dependencies
+
+```powershell
 pip install -r requirements.txt
 ```
 
-Minimal `requirements.txt` example:
+3) Add your Telegram token (create `src/.env`)
 
-```
-python-telegram-bot
-requests
-matplotlib
-numpy
-python-dotenv
+```env
+TELEGRAM_TOKEN=YOUR_BOT_TOKEN_HERE
 ```
 
-**.env** (create `src/.env` and do not commit):
+4) Run the bot (development)
 
-```
-TELEGRAM_TOKEN="YOUR_BOTFATHER_TOKEN"
-```
-
-**Run the bot**:
-
-```bash
+```powershell
 python src/main.py
 ```
 
-On first run the training routine will save regression and markov model pickles in `models/`.
+On the first run the code will train and save model files under `models/` if `REBUILD` is enabled.
 
-## Configuration and parameters
+---
 
-`MODELS_SETTINGS` in `src/main.py` controls defaults:
+## Files & layout
 
-```python
-MODELS_SETTINGS = {
-    "REBUILD": True,    # force retrain on each start
-    "reg": {"min_n": 3, "max_n": 10},
-    "markov": {"min_n": 3, "max_n": 10, "k": 0.2}
-}
+Key paths you will work with:
+
+- `src/` — main bot code and utilities (including `.env` loader and training helpers)
+- `datasets/` — CSV files with historical daily prices (source files used for training)
+- `models/` — saved model artifacts (Markov & regression pickles / safetensors)
+- `temp/` — generated PNG plots used by the bot
+
+---
+
+## Data format
+
+Each CSV in `datasets/` should contain at least a `Date` column and a `Price` column. The repository computes per-day differences and signs if not present.
+
+Minimal example:
+
+```csv
+Date,Price
+2005-04-04,35.938
+2005-04-05,35.790
+2005-04-06,35.845
 ```
 
-* `REBUILD` — retrain on start when `True`.
-* `reg.min_n, reg.max_n` — range of regression lag counts to train.
-* `markov.min_n, markov.max_n` — range of Markov orders to train.
-* `markov.k` — add-`k` smoothing constant.
+The training code expects sequences to be ordered oldest → newest.
 
-Other constants in `main.py` include `CURRENCIES`, `BASE_LATEST`, `BASE_ARCHIVE`, and HTTP session settings.
+---
 
-## Training and forecasting (implementation notes)
+## Models & how forecasting works (brief)
 
-Model file naming:
+- Markov models are built over sign sequences (e.g. last N +/− tokens) and estimate probability of next sign.
+- Regression models predict the numeric next-day difference using a window of previous differences.
+- Ensemble:
+  - majority vote across Markov models for direction
+  - average of regression outputs for magnitude
+  - the direction is used to sign the averaged magnitude when needed
 
-* `regression_{BASE}{QUOTE}_{n}.pkl` — coefficients for `n` lags (vector length `n + 1`).
-* `markov_{BASE}{QUOTE}_{order}.pkl` — dict with `order` and `table`.
+Model artifact naming convention (examples):
 
-Training loop highlights (`train_models_if_needed`):
+- `markov_EURUSD_3.*` — markov model order 3 for EUR→USD
+- `regression_EURUSD_5.*` — regression with 5 lag terms
 
-1. Iterate over non-diagonal pairs of `CURRENCIES` to create pairs like `(EUR, USD)`.
-2. Read `Sign` and `Difference` columns from `datasets/{A}{B}.csv`.
-3. For each `n_lags` in the regression range, call `build_regression(diffs, n_lags)` and save the result.
-4. For each `order` in the Markov range, build and save models.
+---
 
-Forecasting flow:
+## Configuration
 
-1. Fetch recent `needed_days` rates via `fetch_sequences_all_pairs`.
-2. Build `diffs` and `signs` sequences from prices.
-3. Load available regression and markov models from `models/`.
-4. Compute `forecasted_diffs` (averaged regression outputs) and `forecasted_signs` (ensemble Markov votes).
-5. Apply sign adjustment when the Markov majority sign is present.
-6. Convert diffs to cumulative `new_prices` and plot.
+Defaults live in `src/main.py` as `MODELS_SETTINGS`. Typical options:
 
-## Plotting and visualization details
+- `REBUILD` — when true, retrains models at startup
+- `markov.min_n / max_n` — range of orders to build
+- `markov.k` — add-k smoothing value
+- `reg.min_n / max_n` — lags range for regressions
 
-`plot_sequence` renders old prices and predicted prices. X labels are calendar-based; the predicted-line color is set by comparing final predicted vs last observed price. The plotting utilities produce PNG images saved to `temp/`.
+Adjust these values while developing; training cost is small for short ranges.
 
-## Parser and data-fetching robustness
+---
 
-`fetch_sequences_all_pairs` builds ISO-date → pair rates for a configured window of days. For each requested day, it queries the configured API endpoints and converts JSON rates into pairwise ratios `target_per_base`.
+## Development notes
 
-Notes on behavior:
+- This project is intentionally compact and educational — models are simple and not production-ready.
+- Useful improvements: regularized regression, probabilistic calibration, richer features (volatility, volumes), better ensemble logic and test coverage.
 
-* The function carries forward the last known value for missing days by design. The code will surface partial-data cases via logs.
-* Rate-limiting and API availability should be considered when requesting long historical windows.
-
-## Interpretation and limitations (technical)
-
-This section lists technical caveats:
-
-* **Model expressivity:** Markov chains on sign sequences and linear regression on diffs capture limited short-term dependencies.
-* **Numerical stability:** Regression may be ill-conditioned depending on `n_lags` and available data.
-* **Combining outputs:** The ensemble is heuristic and reflects the exact fusion logic implemented in code.
-* **Sampling vs argmax:** The code uses sampling for Markov predictions by default; deterministic behavior can be obtained by selecting the most-probable symbol in the model table.
+---
 
 ## License
 
-This project is distributed under the MIT License — see `LICENSE`.
+MIT — see the `LICENSE` file.
 
 ---
+
+If you want, I can now polish messaging, add quick examples or provide a short developer guide (how to add a new dataset / model). Which would you prefer next?
