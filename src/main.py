@@ -52,7 +52,9 @@ user_interface = {
         "cancel_label": "Отмена",
         "currency_codes": CURRENCIES,
         "days": [str(i) for i in range(1, 10)],
-        "warning_label": "Я понял(-а)"
+        "warning_label": "Я понял(-а)",
+        "gif": "Показать видео",
+        "png": "Показать изображение",
     }
 }
 

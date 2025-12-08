@@ -9,8 +9,8 @@ import io
 
 DPI = 100
 FIGSIZE = (5, 3)
-RESIZE_TO = (640, 384)
-TRANSITION_STEPS = 5 
+RESIZE_TO = None #(640, 384)
+TRANSITION_STEPS = 10
 FRAME_MS = 400
 FINAL_HOLD_MS = 3000
 TRAIL_SAMPLES = 6
@@ -62,7 +62,7 @@ def render_plot_image(old_prices, new_prices):
     plt.close()
 
     buf.seek(0)
-    return Image.open(buf).convert("RGBA").resize(RESIZE_TO, Image.Resampling.LANCZOS)
+    return Image.open(buf).convert("RGBA").resize(RESIZE_TO, Image.Resampling.LANCZOS) if RESIZE_TO else Image.open(buf).convert("RGBA")
 
 
 def plot_sequence(old_prices, new_prices, filename):
