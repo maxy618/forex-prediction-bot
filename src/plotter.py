@@ -65,6 +65,17 @@ def render_plot_image(old_prices, new_prices):
     return Image.open(buf).convert("RGBA").resize(RESIZE_TO, Image.Resampling.LANCZOS)
 
 
+def plot_sequence(old_prices, new_prices, filename):
+    img = render_plot_image(old_prices, new_prices)
+
+    out_dir = os.path.dirname(filename) or "."
+    os.makedirs(out_dir, exist_ok=True)
+
+    img.convert("RGB").save(filename, format="PNG", dpi=(DPI, DPI))
+
+    return filename
+
+
 def add_motion_trail(base_img, forward_img, progress):
     w, h = base_img.size
     trail = Image.new("RGBA", (w, h), (0,0,0,0))
