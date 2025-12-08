@@ -1,147 +1,98 @@
-# forex-prediction-bot
+# Currency Exchange Rates Prediction Telegram Bot
 
-A compact, experimental Telegram bot and a small toolkit for short-horizon exchange-rate forecasting. The project is intentionally simple — it uses an ensemble of
-small models: Markov chains to predict direction (sign) and lagged linear regression to predict magnitude.
+## Overview
 
-This repository includes the data pipeline, training utilities, plotting helpers and a Telegram UI for interactive testing.
+This project is a Telegram bot that provides forecasts for currency exchange rates (EUR, USD, RUB) using statistical models like linear regression and Markov chains. It fetches real-time and historical data from the Central Bank of Russia (CBR), generates visual forecasts as plots or animated GIFs, and offers AI-powered advice via Google's Gemini model
 
-📘 Русская версия: `README_RU.md`
+## Features
 
----
+- **Currency Pair Selection**: Choose pairs like EUR/USD, USD/RUB, etc
+- **Forecasting**: Predict exchange rates for 1–9 days ahead using pre-trained models
+- **Visualizations**: Static PNG plots or animated GIFs showing historical and forecasted rates
+- **AI Advice**: Ask questions about the forecast, and get responses from Gemini AI
+- **Caching**: Efficient data handling with caching for recent forecasts
+- **Logging**: Detailed logging with rotation for debugging.
+- **Model Training**: Automatically trains models from CSV datasets if needed
 
-## Quick overview
+## Requirements
 
-- Purpose: provide a compact research / demo project for short-horizon currency rate predictions and a Telegram-based UI for quick interactive forecasts.
-- Approach: direction predicted with small-order Markov chains over sign sequences; magnitude predicted with simple lagged linear regressions. The final forecast is an ensemble of those components.
+- Python 3.12+
+- Libraries: `requests`, `matplotlib`, `Pillow`, `python-telegram-bot`, `python-dotenv`, `scikit-learn` (implied for regression), `numpy` (for data handling)
+- API Keys: Telegram Bot Token, Google Gemini API Key.
+- Datasets: CSV files in `../datasets/` (e.g., `EURUSD.csv`) with columns ```Date,Price,Sign,Difference```
+- Models: Stored in `../models/` (auto-generated if missing)
 
-Use-cases: rapid prototyping, research experiments or learning how simple forecasting pipelines can be composed into an interactive bot.
+## Installation
 
----
+1. Clone the repository:
+   ```
+   git clone <repository-url>
+   cd <project-directory>
+   ```
 
-## Highlights & Features
+2. Install dependencies:
+   ```
+   pip install -r requirements.txt
+   ```
+   (Note: Create `requirements.txt` based on imports, e.g., requests, matplotlib, Pillow, python-telegram-bot, python-dotenv.)
 
-- Small, readable codebase focused on clarity and experimentation
-- Data parsing utilities for daily rates (CSV-based dataset in `datasets/`) and helper functions to fetch/parsers historical JSON sources
-- Training routines that persist Markov and regression models to `models/`
-- Plotting + convenient PNG exports for visual inspection (`temp/`)
-- A minimal Telegram bot (startup in `src/main.py` → runtime handlers in `src/telegram_bot.py`) for interactive predictions using trained models
+3. Set up environment variables in `.env`:
+   ```
+   TELEGRAM_TOKEN=your-telegram-bot-token
+   GEMINI_API_KEY=your-gemini-api-key
+   CACHE_TTL=300  # Optional, in seconds
+   ```
 
----
+4. Prepare directories:
+   - `../datasets/` for CSV data
+   - `../models/` for trained models
+   - `../temp/` for temporary files (PNGs/GIFs)
+   - `../assets/logo.png` for bot logo (optional)
 
-## Getting started (short)
+## Usage
 
-Requirements: Python 3.8+ and pip.
+1. Train models (if not already done):
+   - Run `main.py`—it will check and train models using data from `../datasets/`
+   ```
+   python main.py
+   ```
 
-1) Create & activate a virtual environment
+2. Start the bot:
+   - The bot has started polling Telegram for messages
 
-Windows (PowerShell):
+3. Interact with the bot:
+   - Send `/start` to begin
+   - Follow prompts: Select base currency, target currency, forecast days
+   - View forecast plot/GIF
+   - Toggle between static/image and animated/GIF
+   - Ask questions for AI advice (e.g., "Is it a good time to buy? / when should i sell this one?")
 
-```powershell
-python -m venv venv
-venv\Scripts\Activate.ps1
-```
+## Configuration
 
-2) Install dependencies
+- **Currencies**: Defined in `main.py` as `["EUR", "USD", "RUB"]`. Add more if needed
+- **Models**:
+  - Regression: Lags from 3 to 10
+  - Markov: Orders from 3 to 10, with Laplace smoothing (k=0.2)
+  - Set `MODELS_SETTINGS["REBUILD"] = True` to retrain
+- **UI Texts**: Customizable in `main.py` under `user_interface` (captions and buttons)
+- **Gemini Prompt**: Template in `main.py` for AI responses—edit for tone/style
+- **HTTP Settings**: Pool size via `HTTP_POOL_SIZE` env var (default 10)
 
-```powershell
-pip install -r requirements.txt
-```
+## How It Works
 
-3) Add your Telegram token (create `src/.env`)
+1. **Data Fetching** (`parser.py`): Pulls JSON from CBR for daily rates, handles retries
+2. **Model Training** (`model_engine.py`, not shown in code snippet but implied): Builds regression coefficients and Markov transition matrices from CSV diffs/signs
+3. **Forecasting** (`telegram_bot.py`): Uses models to predict diffs/signs, adjusts forecasts
+4. **Plotting** (`plotter.py`): Creates matplotlib plots/GIFs with transitions
+5. **Bot Logic** (`telegram_bot.py`): Handles user interactions, state management, AI queries
+6. **Logging** (`logging_util.py`): Rotates logs daily in `../logs/`
 
-```env
-TELEGRAM_TOKEN=YOUR_BOT_TOKEN_HERE
-```
+## Contributing
 
-4) Run the bot (development)
-
-```powershell
-python src/main.py
-```
-
-On the first run the code will train and save model files under `models/` if `REBUILD` is enabled.
-
----
-
-## Key code paths
-
-The relevant code is split into a few focused modules under `src/`:
-
-- `src/main.py` — small orchestrator: trains models on first run (if enabled) and launches the Telegram runtime via `telegram_bot.telegram_main(config)`.
-- `src/telegram_bot.py` — Telegram handlers, UI and per-chat state (runtime logic).
-- `src/parser.py` — HTTP session and fetching helpers used to collect historical rates.
-- `src/model_engine.py` — modeling code: Markov helpers, regression helpers and save/load functions.
-- `src/plotter.py` — plotting helpers for PNG previews used by the bot.
-- `datasets/` — CSV files with historical daily prices (source files used for training)
-- `models/` — saved model artifacts (Markov & regression pickles / safetensors)
-- `temp/` — generated PNG plots used by the bot
-
----
-
-## Data format
-
-Each CSV in `datasets/` should contain at least a `Date` column and a `Price` column. The repository computes per-day differences and signs if not present.
-
-Minimal example:
-
-```csv
-Date,Price
-2005-04-04,35.938
-2005-04-05,35.790
-2005-04-06,35.845
-```
-
-The training code expects sequences to be ordered oldest → newest.
-
----
-
-## Models & how forecasting works (brief)
-
-- Markov models are built over sign sequences (e.g. last N +/− tokens) and estimate probability of next sign.
-- Regression models predict the numeric next-day difference using a window of previous differences.
-- Ensemble:
-  - majority vote across Markov models for direction
-  - average of regression outputs for magnitude
-  - the direction is used to sign the averaged magnitude when needed
-
-Model artifact naming convention (examples):
-
-- `markov_EURUSD_3.*` — markov model order 3 for EUR→USD
-- `regression_EURUSD_5.*` — regression with 5 lag terms
-
----
-
-## Configuration & environment
-
-Defaults live in `src/main.py` as `MODELS_SETTINGS`. Typical options:
-
-- `REBUILD` — when true, retrains models at startup
-- `markov.min_n / max_n` — range of orders to build
-- `markov.k` — add-k smoothing value
-- `reg.min_n / max_n` — lags range for regressions
-
-Adjust these values while developing; training cost is small for the short ranges used by this demo.
-
----
-
-## Developer notes
-
-- This project is intentionally compact and educational — models are simple and not production-ready.
-Suggested improvements: regularized regression, probabilistic calibration, richer features (e.g., volatility, volumes), improved ensemble logic and test coverage.
-
-If you plan to extend the project:
-
-- Add a dataset: drop a CSV into `datasets/` (see Data format) and rebuild models.
-- Modify runtime behavior: update `src/telegram_bot.py` and adjust config in `src/main.py`.
-
-I can also add a small example (adding a dataset + training) or tests if you want — tell me which you'd prefer next.
-
----
+- Fork the repo
+- Create a feature branch
+- Submit a pull request with clear descriptions
 
 ## License
 
-MIT — see the `LICENSE` file.
-
----
-
-If you want, I can now polish messaging, add quick examples or provide a short developer guide (how to add a new dataset / model). Which would you prefer next?
+MIT License. See `LICENSE` file for details.
