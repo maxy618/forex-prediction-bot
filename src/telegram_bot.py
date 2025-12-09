@@ -380,9 +380,19 @@ def _perform_prediction_and_edit(bot, chat_id, message_id, user_id, first, secon
         logger.exception("_perform_prediction_and_edit: failed to create gif, falling back to png")
         gif_path = png_path
     delta = new_prices[-1] - last_price
-    sign_text = "вырастет" if delta > 0 else "упадет"
+    delta_percent = (delta / last_price) * 100 if last_price != 0 else 0
+    arrow = "↑" if delta > 0 else "↓" if delta < 0 else "→"
+    color_emoji = "🟢" if delta > 0 else "🔴" if delta < 0 else "🟡"
+    trend = "рост" if delta > 0 else "падение" if delta < 0 else "без изменений"
     verb = "стоит" if delta > 0 else "не стоит"
-    advice = f"Скорее всего {verb} покупать — цена {sign_text} на {abs(delta):.6f}"
+    advice = f"Скорее всего {verb} покупать"
+    caption = (
+        f"{first}/{second} → {last_price:.6f}\n"
+        f"{color_emoji} Прогноз: {trend}\n"
+        f"{arrow} {delta_percent:+.2f}% за {days} дн. ({delta:+.6f})\n{advice}\n\n"
+        f"Данные на {date.today().strftime('%d.%m.%Y')}"
+    )
+
     state = _get_chat_state(chat_id)
     state.setdefault("qa_history", [])
     state.setdefault("asked_count", 0)
@@ -392,9 +402,8 @@ def _perform_prediction_and_edit(bot, chat_id, message_id, user_id, first, secon
     kb = _make_rows([
         [(toggle_label, "toggle")],
         [(user_interface["buttons"]["back_label"], "back:first"),
-        (ask_label, ask_cb)]
+         (ask_label, ask_cb)]
     ])
-    caption = f"{first}/{second}\n{advice}"
     success = _send_replace_media(bot, chat_id, message_id, gif_path, is_gif=True, caption=caption, reply_markup=kb)
     if not success:
         return
@@ -745,6 +754,8 @@ def telegram_main(config: dict):
     PROMPT_TEMPLATE = config.get('PROMPT_TEMPLATE')
     if GEMINI_MODEL:
         GEMINI_URL = f"https://generativelanguage.googleapis.com/v1beta/models/{GEMINI_MODEL}:generateContent"
+    if TEMP_FOLDER and os.path.isdir(TEMP_FOLDER): 
+        [os.remove(os.path.join(TEMP_FOLDER, f)) for f in os.listdir(TEMP_FOLDER) if os.path.isfile(os.path.join(TEMP_FOLDER, f))]
     req = Request(con_pool_size=HTTP_POOL_SIZE, connect_timeout=30, read_timeout=30)
     bot = Bot(token=TELEGRAM_TOKEN, request=req)
     updater = Updater(bot=bot, use_context=True)
