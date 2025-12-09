@@ -53,7 +53,7 @@ user_interface = {
         "currency_codes": CURRENCIES,
         "days": [str(i) for i in range(1, 10)],
         "warning_label": "Я понял(-а)",
-        "gif": "Показать видео",
+        "gif": "Показать анимацию",
         "png": "Показать изображение",
     }
 }
