@@ -2,7 +2,7 @@
 
 ## Overview
 
-This project is a Telegram bot that provides forecasts for currency exchange rates (EUR, USD, RUB) using statistical models like linear regression and Markov chains. It fetches real-time and historical data from the Central Bank of Russia (CBR), generates visual forecasts as plots or animated GIFs, and offers AI-powered advice via Google's Gemini model
+This project is a Telegram bot that provides forecasts for currency exchange rates ("USD", "EUR", "JPY", "GBP", "CHF", "RUB") using statistical models like linear regression and Markov chains. It fetches real-time and historical data from the Central Bank of Russia (CBR), generates visual forecasts as plots or animated GIFs, and offers AI-powered advice via Google's Gemini model
 
 ## Features
 
@@ -69,7 +69,7 @@ This project is a Telegram bot that provides forecasts for currency exchange rat
 
 ## Configuration
 
-- **Currencies**: Defined in `main.py` as `["EUR", "USD", "RUB"]`. Add more if needed
+- **Currencies**: Defined in `main.py` as `["USD", "EUR", "JPY", "GBP", "CHF", "RUB"]`. Add more if needed
 - **Models**:
   - Regression: Lags from 3 to 10
   - Markov: Orders from 3 to 10, with Laplace smoothing (k=0.2)
