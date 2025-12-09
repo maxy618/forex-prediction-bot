@@ -16,7 +16,7 @@ from model_engine import (
 from telegram_bot import telegram_main
 
 
-CURRENCIES = ["EUR", "USD", "RUB"]
+CURRENCIES = ["USD", "EUR", "JPY", "GBP", "CHF", "RUB"]
 
 MODELS_SETTINGS = {
     "REBUILD": True,

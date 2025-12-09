@@ -71,14 +71,36 @@ def _markup_repr(reply_markup):
 
 def _kb_first():
     codes = user_interface["buttons"].get("currency_codes", CURRENCIES)
-    return _make_rows([[(c, f"first:{c}") for c in codes]])
+    n = len(codes) if codes else 0
+    if n <= 3:
+        rows_cnt = 1
+    elif n <= 6:
+        rows_cnt = 2
+    else:
+        rows_cnt = 3
+    chunk = (n + rows_cnt - 1) // rows_cnt if n else 1
+    pairs = []
+    for i in range(0, n, chunk):
+        pairs.append([(c, f"first:{c}") for c in codes[i:i+chunk]])
+    return _make_rows(pairs)
 
 
 def _kb_second(first):
     codes = user_interface["buttons"].get("currency_codes", CURRENCIES)
     buttons = [(c, f"second:{first}:{c}") for c in codes if c != first]
-    buttons.append((user_interface["buttons"]["back_label"], "back:first"))
-    return _make_rows([buttons])
+    n = len(buttons)
+    if n <= 3:
+        rows_cnt = 1
+    elif n <= 6:
+        rows_cnt = 2
+    else:
+        rows_cnt = 3
+    chunk = (n + rows_cnt - 1) // rows_cnt if n else 1
+    pairs = []
+    for i in range(0, n, chunk):
+        pairs.append(buttons[i:i+chunk])
+    pairs.append([(user_interface["buttons"]["back_label"], "back:first")])
+    return _make_rows(pairs)
 
 
 def _kb_days(first, second):
