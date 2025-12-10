@@ -2,17 +2,10 @@ import os
 import time
 import threading
 import json
-from datetime import date, timedelta
+from datetime import date
 
 from logging_util import setup_logging, exception_rid
 logger = setup_logging(level="debug", name=__name__)
-
-import matplotlib
-matplotlib.use("Agg")
-import matplotlib.pyplot as plt
-
-from PIL import Image
-import io
 
 from telegram import Bot, InlineKeyboardButton, InlineKeyboardMarkup, InputMediaPhoto, InputMediaAnimation
 from telegram.error import BadRequest
@@ -22,6 +15,7 @@ from telegram.utils.request import Request
 from parser import SESSION, HTTP_POOL_SIZE, fetch_sequences_all_pairs
 from plotter import plot_sequence, make_forecast_gif
 from model_engine import load_model, forecast_diffs, forecast_signs
+
 
 TELEGRAM_TOKEN = None
 TEMP_FOLDER = None
@@ -440,7 +434,7 @@ def _perform_prediction_and_edit(bot, chat_id, message_id, user_id, first, secon
         "forecasted_prices": [float(x) for x in new_prices],
         "forecasted_diffs": [float(x) for x in adjusted],
         "forecast_delta": float(delta),
-        "advice_text": advice,
+        "advice_text": caption,
         "forecast_ts": int(time.time()),
         "cached_all_rates": all_rates,
         "cached_pair_key": pair_key,
@@ -726,7 +720,6 @@ def question_message_handler(update, context):
             f"Forecast days: {days}\n"
             f"Forecasted prices: {forecast_text}\n"
             f"Forecast delta (last vs current): {forecast_delta:.6f}\n"
-            f"Advice (bot): {advice_text}\n"
         )
     else:
         summary_text = f"{history_text}Pair: {first}/{second}\nLatest prices: {last_prices_text}\nForecast days: {days}\n"

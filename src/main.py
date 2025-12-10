@@ -94,7 +94,6 @@ Latest prices: 100.123456, 100.234567, 100.345678
 Forecast days: 3
 Forecasted prices: 100.400000, 100.450000, 100.500000
 Forecast delta (last vs current): 0.154322
-Advice (bot): стоит покупать — прогноз роста
 
 Читай summary_text, слушай вопрос пользователя и отвечай как нормальный человек.
 """
