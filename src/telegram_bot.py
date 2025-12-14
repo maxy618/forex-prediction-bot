@@ -191,14 +191,6 @@ def _edit_with_retries(action_callable, bot: Bot, chat_id: int, message_id: int,
 
 
 def _replace_with_logo(bot, chat_id, message_id, caption=None, reply_markup=None, max_attempts=3, delay=1.0):
-    state = _get_chat_state(chat_id)
-    if state["has_logo"]:
-        def try_edit_caption():
-            bot.edit_message_caption(chat_id=chat_id, message_id=message_id, caption=caption, reply_markup=reply_markup)
-        success = _edit_with_retries(try_edit_caption, bot, chat_id, message_id, max_attempts=max_attempts, delay=delay)
-        if not success:
-            return
-        return
     if os.path.exists(LOGO_PATH):
         def try_edit_media():
             with open(LOGO_PATH, "rb") as f:
@@ -206,14 +198,13 @@ def _replace_with_logo(bot, chat_id, message_id, caption=None, reply_markup=None
                 bot.edit_message_media(media=media, chat_id=chat_id, message_id=message_id, reply_markup=reply_markup)
         success = _edit_with_retries(try_edit_media, bot, chat_id, message_id, max_attempts=max_attempts, delay=delay)
         if success:
-            _save_chat_state(chat_id, message_id, True)
+            _save_chat_state(chat_id, message_id, True, last_caption=caption or "", last_markup=_markup_repr(reply_markup))
             return
-        return
     def try_edit_caption_no_logo():
         bot.edit_message_caption(chat_id=chat_id, message_id=message_id, caption=caption, reply_markup=reply_markup)
     success = _edit_with_retries(try_edit_caption_no_logo, bot, chat_id, message_id, max_attempts=max_attempts, delay=delay)
     if success:
-        _save_chat_state(chat_id, message_id, False)
+        _save_chat_state(chat_id, message_id, False, last_caption=caption or "", last_markup=_markup_repr(reply_markup))
     return
 
 
@@ -543,7 +534,7 @@ def cb_query(update, context):
             try:
                 with _get_chat_lock(chat_id):
                     state = _get_chat_state(chat_id)
-                    for key in ("last_media_png", "last_media_gif"):
+                    for key in ("last_media_png", "last_media_gif", "last_media"):
                         p = state.get(key)
                         if p and os.path.exists(p):
                             try:
@@ -557,7 +548,13 @@ def cb_query(update, context):
                     state.pop("forecast_delta", None)
                     state.pop("advice_text", None)
                     state.pop("forecast_ts", None)
+                    state.pop("media_format", None)
+                    state.pop("last_media_png", None)
+                    state.pop("last_media_gif", None)
+                    state.pop("last_media", None)
                     state["awaiting_question"] = False
+                    state["qa_history"] = []
+                    state["asked_count"] = 0
                     CHAT_STATE[chat_id] = state
             except Exception:
                 logger.exception("cb_query.back:first: failed to clear cache for chat=%s", chat_id)
@@ -568,7 +565,7 @@ def cb_query(update, context):
             try:
                 with _get_chat_lock(chat_id):
                     state = _get_chat_state(chat_id)
-                    for key in ("last_media_png", "last_media_gif"):
+                    for key in ("last_media_png", "last_media_gif", "last_media"):
                         p = state.get(key)
                         if p and os.path.exists(p):
                             try:
@@ -582,7 +579,13 @@ def cb_query(update, context):
                     state.pop("forecast_delta", None)
                     state.pop("advice_text", None)
                     state.pop("forecast_ts", None)
+                    state.pop("media_format", None)
+                    state.pop("last_media_png", None)
+                    state.pop("last_media_gif", None)
+                    state.pop("last_media", None)
                     state["awaiting_question"] = False
+                    state["qa_history"] = []
+                    state["asked_count"] = 0
                     CHAT_STATE[chat_id] = state
             except Exception:
                 logger.exception("cb_query.back:second: failed to clear cache for chat=%s", chat_id)
