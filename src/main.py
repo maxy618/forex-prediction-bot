@@ -64,10 +64,11 @@ DATASETS_PATH = "../datasets/"
 MODELS_PATH = "../models/"
 TEMP_FOLDER = "../temp/"
 LOGO_PATH = "../assets/logo.png"
+ASK_IMG_PATH = "../assets/ask_question.png"
+AI_THINKING_PATH = "../assets/ai_thinking.png"
 
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
 GEMINI_MODEL = "gemini-2.5-flash"
-GEMINI_URL = f"https://generativelanguage.googleapis.com/v1beta/models/{GEMINI_MODEL}:generateContent"
 
 PROMPT_TEMPLATE = (
     """
@@ -152,6 +153,8 @@ if __name__ == "__main__":
         "TELEGRAM_TOKEN": TELEGRAM_TOKEN,
         "TEMP_FOLDER": TEMP_FOLDER,
         "LOGO_PATH": LOGO_PATH,
+        "ASK_IMG_PATH": ASK_IMG_PATH,
+        "AI_THINKING_PATH": AI_THINKING_PATH,
         "MODELS_PATH": MODELS_PATH,
         "MODELS_SETTINGS": MODELS_SETTINGS,
         "CURRENCIES": CURRENCIES,

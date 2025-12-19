@@ -20,6 +20,8 @@ from model_engine import load_model, forecast_diffs, forecast_signs
 TELEGRAM_TOKEN = None
 TEMP_FOLDER = None
 LOGO_PATH = None
+ASK_IMG_PATH = None
+AI_THINKING_PATH = None
 MODELS_PATH = None
 MODELS_SETTINGS = None
 CURRENCIES = None
@@ -131,19 +133,31 @@ def _get_chat_state(chat_id):
     return CHAT_STATE.get(chat_id, {"msg_id": None, "has_logo": False, "awaiting_question": False})
 
 
+def _kb_with_toggle_for_state(state):
+    media_format = state.get("media_format", "gif")
+    if media_format == "gif":
+        toggle_label = user_interface["buttons"]["png"]
+    else:
+        toggle_label = user_interface["buttons"]["gif"]
+    first = state.get("first")
+    second = state.get("second")
+    days = int(state.get("days", 1)) if state.get("days") is not None else 1
+    rows = []
+    rows.append([(toggle_label, "toggle")])
+    if first and second:
+        ask_label = user_interface["buttons"]["ask_label_first"] if state.get("asked_count", 0) == 0 else user_interface["buttons"]["ask_label_more"]
+        rows.append([(user_interface["buttons"]["back_label"], "back:first"),
+                     (ask_label, f"ask:{first}:{second}:{days}")])
+    else:
+        rows.append([(user_interface["buttons"]["back_label"], "back:first")])
+    return _make_rows(rows)
+
+
 def _send_start_message(bot: Bot, chat_id: int):
-    if os.path.exists(LOGO_PATH):
-        try:
-            with open(LOGO_PATH, "rb") as f:
-                kb = InlineKeyboardMarkup([[InlineKeyboardButton(user_interface["buttons"]["warning_label"], callback_data="do_predict")]])
-                msg = bot.send_photo(chat_id=chat_id, photo=f, caption=user_interface["captions"]["warning"], reply_markup=kb)
-            _save_chat_state(chat_id, msg.message_id, True, last_caption=user_interface["captions"]["warning"], last_markup=_markup_repr(kb))
-            return msg
-        except Exception:
-            logger.exception("_send_start_message: failed to send photo to %s", chat_id)
-    kb = InlineKeyboardMarkup([[InlineKeyboardButton(user_interface["buttons"]["warning_label"], callback_data="do_predict")]])
-    msg = bot.send_message(chat_id=chat_id, text=user_interface["captions"]["warning"], reply_markup=kb)
-    _save_chat_state(chat_id, msg.message_id, False, last_caption=user_interface["captions"]["warning"], last_markup=_markup_repr(kb))
+    with open(LOGO_PATH, "rb") as f:
+        kb = InlineKeyboardMarkup([[InlineKeyboardButton(user_interface["buttons"]["warning_label"], callback_data="do_predict")]])
+        msg = bot.send_photo(chat_id=chat_id, photo=f, caption=user_interface["captions"]["warning"], reply_markup=kb)
+    _save_chat_state(chat_id, msg.message_id, True, last_caption=user_interface["captions"]["warning"], last_markup=_markup_repr(kb))
     return msg
 
 
@@ -191,15 +205,14 @@ def _edit_with_retries(action_callable, bot: Bot, chat_id: int, message_id: int,
 
 
 def _replace_with_logo(bot, chat_id, message_id, caption=None, reply_markup=None, max_attempts=3, delay=1.0):
-    if os.path.exists(LOGO_PATH):
-        def try_edit_media():
-            with open(LOGO_PATH, "rb") as f:
-                media = InputMediaPhoto(f, caption=caption)
-                bot.edit_message_media(media=media, chat_id=chat_id, message_id=message_id, reply_markup=reply_markup)
-        success = _edit_with_retries(try_edit_media, bot, chat_id, message_id, max_attempts=max_attempts, delay=delay)
-        if success:
-            _save_chat_state(chat_id, message_id, True, last_caption=caption or "", last_markup=_markup_repr(reply_markup))
-            return
+    def try_edit_media():
+        with open(LOGO_PATH, "rb") as f:
+            media = InputMediaPhoto(f, caption=caption)
+            bot.edit_message_media(media=media, chat_id=chat_id, message_id=message_id, reply_markup=reply_markup)
+    success = _edit_with_retries(try_edit_media, bot, chat_id, message_id, max_attempts=max_attempts, delay=delay)
+    if success:
+        _save_chat_state(chat_id, message_id, True, last_caption=caption or "", last_markup=_markup_repr(reply_markup))
+        return
     def try_edit_caption_no_logo():
         bot.edit_message_caption(chat_id=chat_id, message_id=message_id, caption=caption, reply_markup=reply_markup)
     success = _edit_with_retries(try_edit_caption_no_logo, bot, chat_id, message_id, max_attempts=max_attempts, delay=delay)
@@ -405,12 +418,13 @@ def _perform_prediction_and_edit(bot, chat_id, message_id, user_id, first, secon
     state.setdefault("asked_count", 0)
     ask_cb = f"ask:{first}:{second}:{days}"
     ask_label = user_interface["buttons"]["ask_label_first"] if state.get("asked_count", 0) == 0 else user_interface["buttons"]["ask_label_more"]
-    toggle_label = user_interface["buttons"]["png"]
-    kb = _make_rows([
-        [(toggle_label, "toggle")],
-        [(user_interface["buttons"]["back_label"], "back:first"),
-         (ask_label, ask_cb)]
-    ])
+    kb = _kb_with_toggle_for_state({
+        "media_format": "gif",
+        "first": first,
+        "second": second,
+        "days": days,
+        "asked_count": state.get("asked_count", 0)
+    })
     success = _send_replace_media(bot, chat_id, message_id, gif_path, is_gif=True, caption=caption, reply_markup=kb)
     if not success:
         return
@@ -493,15 +507,11 @@ def cb_query(update, context):
                 CHAT_STATE[chat_id] = state
         except Exception:
             logger.exception("cb_query: failed to set awaiting_question for chat=%s", chat_id)
+        cancel_kb = _make_rows([[ (user_interface["buttons"]["cancel_label"], f"cancel_ask") ]])
         try:
-            def try_edit_ask():
-                context.bot.edit_message_caption(chat_id=chat_id, message_id=message_id, caption=user_interface["captions"]["ask_question"], reply_markup=_make_rows([[ (user_interface["buttons"]["cancel_label"], f"cancel_ask") ]]))
-            _edit_with_retries(try_edit_ask, context.bot, chat_id, message_id)
+            _send_replace_media(context.bot, chat_id, message_id, ASK_IMG_PATH, is_gif=False, caption=user_interface["captions"]["ask_question"], reply_markup=cancel_kb)
         except Exception:
-            try:
-                context.bot.send_message(chat_id=chat_id, text=user_interface["captions"]["ask_question"], reply_markup=_make_rows([[ (user_interface["buttons"]["cancel_label"], f"cancel_ask") ]]))
-            except Exception:
-                logger.exception("cb_query: failed to send ask_question fallback to chat=%s", chat_id)
+            logger.exception("cb_query: failed to show ask image for chat=%s", chat_id)
         return
     if cmd == "cancel_ask":
         try:
@@ -511,23 +521,22 @@ def cb_query(update, context):
                 CHAT_STATE[chat_id] = state
         except Exception:
             logger.exception("cb_query: failed to clear awaiting_question for chat=%s", chat_id)
-        advice_text = state.get("advice_text")
-        first = state.get("first")
-        second = state.get("second")
-        days = int(state.get("days", 1)) if state.get("days") is not None else 1
-        kb = None
-        if first and second:
-            ask_label = user_interface["buttons"]["ask_label_first"] if state.get("asked_count", 0) == 0 else user_interface["buttons"]["ask_label_more"]
-            kb = _make_rows([[ (user_interface["buttons"]["back_label"], "back:first"), (ask_label, f"ask:{first}:{second}:{days}") ]])
+        media_format = state.get("media_format", "gif")
+        if media_format == "gif":
+            media_path = state.get("last_media_gif") or state.get("last_media_png")
+            is_gif = True
+        else:
+            media_path = state.get("last_media_png") or state.get("last_media_gif")
+            is_gif = False
+        if not media_path or not os.path.exists(media_path):
+            _replace_with_logo(context.bot, chat_id, message_id, caption=state.get("advice_text") or user_interface["captions"]["choose_first"], reply_markup=_kb_first())
+            return
+        kb = _kb_with_toggle_for_state(state)
+        caption = state.get("advice_text", "")
         try:
-            def try_edit_back():
-                context.bot.edit_message_caption(chat_id=chat_id, message_id=message_id, caption=advice_text, reply_markup=kb)
-            _edit_with_retries(try_edit_back, context.bot, chat_id, message_id)
+            _send_replace_media(context.bot, chat_id, message_id, media_path, is_gif, caption=caption, reply_markup=kb)
         except Exception:
-            try:
-                context.bot.send_message(chat_id=chat_id, text=advice_text, reply_markup=kb)
-            except Exception:
-                logger.exception("cb_query: failed to send advice_text fallback to chat=%s", chat_id)
+            logger.exception("cb_query: failed to restore media after cancel for chat=%s", chat_id)
         return
     if cmd == "back":
         if len(parts) >= 2 and parts[1] == "first":
@@ -603,11 +612,9 @@ def cb_query(update, context):
         if target == "png":
             media_path = state.get("last_media_png")
             is_gif = False
-            toggle_label = user_interface["buttons"]["gif"]
         else:
             media_path = state.get("last_media_gif")
             is_gif = True
-            toggle_label = user_interface["buttons"]["png"]
         first = state.get("first")
         second = state.get("second")
         days = int(state.get("days", 1)) if state.get("days") is not None else 1
@@ -637,12 +644,7 @@ def cb_query(update, context):
                         is_gif = False
             except Exception:
                 logger.exception("cb_query.toggle: failed to (re)generate media for chat=%s", chat_id)
-        ask_label = user_interface["buttons"]["ask_label_first"] if state.get("asked_count", 0) == 0 else user_interface["buttons"]["ask_label_more"]
-        kb = _make_rows([
-            [(toggle_label, f"toggle")],
-            [(user_interface["buttons"]["back_label"], "back:first"),
-            (ask_label, f"ask:{first}:{second}:{days}")]
-        ])
+        kb = _kb_with_toggle_for_state(state)
         caption = state.get("advice_text", "")
         success = _send_replace_media(context.bot, chat_id, message_id, media_path, is_gif, caption=caption, reply_markup=kb)
         if success:
@@ -676,9 +678,10 @@ def question_message_handler(update, context):
     except Exception:
         logger.exception("question_message_handler: failed to delete user message %s in chat=%s", user_msg_id, chat_id)
     bot_msg_id = state.get("msg_id")
-    def try_edit_awaiting():
-        context.bot.edit_message_caption(chat_id=chat_id, message_id=bot_msg_id, caption=user_interface["captions"]["awaiting_assistant"], reply_markup=None)
-    _edit_with_retries(try_edit_awaiting, context.bot, chat_id, bot_msg_id)
+    try:
+        _send_replace_media(context.bot, chat_id, bot_msg_id, AI_THINKING_PATH, is_gif=False, caption=user_interface["captions"]["awaiting_assistant"], reply_markup=None)
+    except Exception:
+        logger.exception("question_message_handler: failed to show ai_thinking for chat=%s", chat_id)
     try:
         first = state.get("first")
         second = state.get("second")
@@ -739,29 +742,33 @@ def question_message_handler(update, context):
             CHAT_STATE[chat_id] = state
     except Exception:
         logger.exception("question_message_handler: failed to update QA history for chat=%s", chat_id)
-    first = state.get("first")
-    second = state.get("second")
-    kb = None
-    if first and second:
-        ask_label = user_interface["buttons"]["ask_label_first"] if state.get("asked_count", 0) == 0 else user_interface["buttons"]["ask_label_more"]
-        kb = _make_rows([[ (user_interface["buttons"]["back_label"], "back:first"), (ask_label, f"ask:{first}:{second}:{state.get('days',1)}") ]])
     try:
-        bot_msg_id = state.get("msg_id")
-        def try_edit_final():
-            context.bot.edit_message_caption(chat_id=chat_id, message_id=bot_msg_id, caption=final_caption, reply_markup=kb)
-        _edit_with_retries(try_edit_final, context.bot, chat_id, bot_msg_id)
+        state = _get_chat_state(chat_id)
+        media_format = state.get("media_format", "gif")
+        if media_format == "gif":
+            media_path = state.get("last_media_gif") or state.get("last_media_png")
+            is_gif = True
+        else:
+            media_path = state.get("last_media_png") or state.get("last_media_gif")
+            is_gif = False
+        kb = _kb_with_toggle_for_state(state)
+        if media_path and os.path.exists(media_path):
+            _send_replace_media(context.bot, chat_id, bot_msg_id, media_path, is_gif, caption=final_caption, reply_markup=kb)
+        else:
+            def try_edit_final():
+                context.bot.edit_message_caption(chat_id=chat_id, message_id=bot_msg_id, caption=final_caption, reply_markup=kb)
+            _edit_with_retries(try_edit_final, context.bot, chat_id, bot_msg_id)
     except Exception:
-        try:
-            context.bot.send_message(chat_id=chat_id, text=final_caption, reply_markup=kb)
-        except Exception:
-            logger.exception("question_message_handler: failed to send message to chat=%s", chat_id)
+        logger.exception("question_message_handler: failed to restore media or edit final caption for chat=%s", chat_id)
 
 
 def telegram_main(config: dict):
-    global TELEGRAM_TOKEN, TEMP_FOLDER, LOGO_PATH, MODELS_PATH, MODELS_SETTINGS, CURRENCIES, user_interface, CACHE_TTL, GEMINI_API_KEY, GEMINI_MODEL, GEMINI_URL, PROMPT_TEMPLATE
+    global TELEGRAM_TOKEN, TEMP_FOLDER, LOGO_PATH, MODELS_PATH, MODELS_SETTINGS, CURRENCIES, user_interface, CACHE_TTL, GEMINI_API_KEY, GEMINI_MODEL, GEMINI_URL, PROMPT_TEMPLATE, ASK_IMG_PATH, AI_THINKING_PATH
     TELEGRAM_TOKEN = config.get('TELEGRAM_TOKEN')
     TEMP_FOLDER = config.get('TEMP_FOLDER')
     LOGO_PATH = config.get('LOGO_PATH')
+    ASK_IMG_PATH = config.get('ASK_IMG_PATH')
+    AI_THINKING_PATH = config.get('AI_THINKING_PATH')
     MODELS_PATH = config.get('MODELS_PATH')
     MODELS_SETTINGS = config.get('MODELS_SETTINGS')
     CURRENCIES = config.get('CURRENCIES')
@@ -772,7 +779,7 @@ def telegram_main(config: dict):
     PROMPT_TEMPLATE = config.get('PROMPT_TEMPLATE')
     if GEMINI_MODEL:
         GEMINI_URL = f"https://generativelanguage.googleapis.com/v1beta/models/{GEMINI_MODEL}:generateContent"
-    if TEMP_FOLDER and os.path.isdir(TEMP_FOLDER): 
+    if TEMP_FOLDER and os.path.isdir(TEMP_FOLDER):
         [os.remove(os.path.join(TEMP_FOLDER, f)) for f in os.listdir(TEMP_FOLDER) if os.path.isfile(os.path.join(TEMP_FOLDER, f))]
     req = Request(con_pool_size=HTTP_POOL_SIZE, connect_timeout=30, read_timeout=30)
     bot = Bot(token=TELEGRAM_TOKEN, request=req)
