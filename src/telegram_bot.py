@@ -5,9 +5,16 @@ import json
 from datetime import date
 
 from logging_util import setup_logging, exception_rid
+
 logger = setup_logging(level="debug", name=__name__)
 
-from telegram import Bot, InlineKeyboardButton, InlineKeyboardMarkup, InputMediaPhoto, InputMediaAnimation
+from telegram import (
+    Bot,
+    InlineKeyboardButton,
+    InlineKeyboardMarkup,
+    InputMediaPhoto,
+    InputMediaAnimation,
+)
 from telegram.error import BadRequest
 from telegram.ext import Updater, CommandHandler, CallbackQueryHandler, MessageHandler, Filters
 from telegram.utils.request import Request
@@ -22,6 +29,7 @@ TEMP_FOLDER = None
 LOGO_PATH = None
 ASK_IMG_PATH = None
 AI_THINKING_PATH = None
+PREDICTING_PATH = None
 MODELS_PATH = None
 MODELS_SETTINGS = None
 CURRENCIES = None
@@ -36,10 +44,9 @@ CHAT_STATE = {}
 CHAT_LOCKS = {}
 
 
-def _temp_file(user_id, ext="png"):
+def _temp_file(uid, ext="png"):
     os.makedirs(TEMP_FOLDER, exist_ok=True)
-    out = os.path.join(TEMP_FOLDER, f"{user_id}_{int(time.time()*1000)}.{ext}")
-    return out
+    return os.path.join(TEMP_FOLDER, f"{uid}_{int(time.time() * 1000)}.{ext}")
 
 
 def _get_chat_lock(chat_id):
@@ -65,19 +72,29 @@ def _markup_repr(reply_markup):
         return str(reply_markup)
 
 
+def _make_rows(pairs):
+    keyboard = []
+    for row in pairs:
+        keyboard.append([InlineKeyboardButton(text, callback_data=cb) for text, cb in row])
+    return InlineKeyboardMarkup(keyboard)
+
+
+def _protected_assets():
+    return {p for p in (LOGO_PATH, ASK_IMG_PATH, AI_THINKING_PATH, PREDICTING_PATH) if p}
+
+
+def _is_protected_asset(path):
+    return isinstance(path, str) and path in _protected_assets()
+
+
 def _kb_first():
     codes = user_interface["buttons"].get("currency_codes", CURRENCIES)
     n = len(codes) if codes else 0
-    if n <= 3:
-        rows_cnt = 1
-    elif n <= 6:
-        rows_cnt = 2
-    else:
-        rows_cnt = 3
+    rows_cnt = 1 if n <= 3 else 2 if n <= 6 else 3
     chunk = (n + rows_cnt - 1) // rows_cnt if n else 1
     pairs = []
     for i in range(0, n, chunk):
-        pairs.append([(c, f"first:{c}") for c in codes[i:i+chunk]])
+        pairs.append([(c, f"first:{c}") for c in codes[i : i + chunk]])
     return _make_rows(pairs)
 
 
@@ -85,16 +102,9 @@ def _kb_second(first):
     codes = user_interface["buttons"].get("currency_codes", CURRENCIES)
     buttons = [(c, f"second:{first}:{c}") for c in codes if c != first]
     n = len(buttons)
-    if n <= 3:
-        rows_cnt = 1
-    elif n <= 6:
-        rows_cnt = 2
-    else:
-        rows_cnt = 3
+    rows_cnt = 1 if n <= 3 else 2 if n <= 6 else 3
     chunk = (n + rows_cnt - 1) // rows_cnt if n else 1
-    pairs = []
-    for i in range(0, n, chunk):
-        pairs.append(buttons[i:i+chunk])
+    pairs = [buttons[i : i + chunk] for i in range(0, n, chunk)]
     pairs.append([(user_interface["buttons"]["back_label"], "back:first")])
     return _make_rows(pairs)
 
@@ -110,52 +120,37 @@ def _kb_days(first, second):
             row = []
     if row:
         rows.append(row)
-    rows.append([ (user_interface["buttons"]["back_label"], f"back:second:{first}") ])
+    rows.append([(user_interface["buttons"]["back_label"], f"back:second:{first}")])
     return _make_rows(rows)
 
 
-def _make_rows(pairs):
-    keyboard = []
-    for row in pairs:
-        keyboard.append([InlineKeyboardButton(text, callback_data=cb) for text, cb in row])
-    return InlineKeyboardMarkup(keyboard)
+def _kb_confirm(first, second, days):
+    confirm_label = user_interface["buttons"].get("confirm_label", "Все верно")
+    back_label = user_interface["buttons"]["back_label"]
+    return _make_rows([[(confirm_label, f"confirm:{first}:{second}:{days}")], [(back_label, f"back:second:{first}")]])
 
 
 def _save_chat_state(chat_id, message_id, has_logo, **kwargs):
     state = CHAT_STATE.get(chat_id, {})
     state.update({"msg_id": int(message_id), "has_logo": bool(has_logo)})
-    for k, v in kwargs.items():
-        state[k] = v
+    state.update(kwargs)
     CHAT_STATE[chat_id] = state
 
 
 def _get_chat_state(chat_id):
-    return CHAT_STATE.get(chat_id, {"msg_id": None, "has_logo": False, "awaiting_question": False, "asked_count": 0})
+    return CHAT_STATE.get(
+        chat_id,
+        {"msg_id": None, "has_logo": False, "awaiting_question": False, "asked_count": 0},
+    )
 
 
 def _kb_for_state(state):
-    """
-    Генерирует корректную клавиатуру для текущего состояния `state`.
-    Правила:
-     - Если state['awaiting_question'] == True -> НЕ показываем кнопку toggle (вопрос в процессе).
-     - Если показ текущего экрана — это экран ПОСЛЕ того, как пользователь задал вопрос (asked_count > asked_count_at_prediction),
-       то НЕ показываем кнопку toggle и кнопка "назад" ведёт к восстановлению графика (back:restore).
-     - В остальных случаях показываем toggle и строки [toggle] + [back, ask].
-    """
-    # determine whether to show toggle:
     awaiting = bool(state.get("awaiting_question", False))
-    asked_count = int(state.get("asked_count", 0))
-    asked_at_pred = int(state.get("asked_count_at_prediction", 0)) if state.get("asked_count_at_prediction") is not None else asked_count
-
-    show_toggle = (not awaiting) and (asked_count == asked_at_pred)
-
+    asked = int(state.get("asked_count", 0))
+    asked_at_pred = int(state.get("asked_count_at_prediction", 0)) if state.get("asked_count_at_prediction") is not None else asked
+    show_toggle = (not awaiting) and (asked == asked_at_pred)
     media_format = state.get("media_format", "gif")
-    # choose toggle label: offer the *other* format as action
-    if media_format == "gif":
-        toggle_label = user_interface["buttons"]["png"]
-    else:
-        toggle_label = user_interface["buttons"]["gif"]
-
+    toggle_label = user_interface["buttons"]["png"] if media_format == "gif" else user_interface["buttons"]["gif"]
     first = state.get("first")
     second = state.get("second")
     days = int(state.get("days", 1)) if state.get("days") is not None else 1
@@ -164,22 +159,14 @@ def _kb_for_state(state):
     if show_toggle:
         rows.append([(toggle_label, "toggle")])
 
-    # Decide back callback:
-    # If we have a pair (graph shown) and we're in post-question state (asked_count > asked_at_pred),
-    # make back restore the graph as it was at prediction time.
-    if first and second and (asked_count > asked_at_pred):
+    if first and second and (asked > asked_at_pred):
         back_cb = "back:restore"
-    elif first and second:
-        # if we have pair but not post-question, back should go to first selection (as previous design)
-        back_cb = "back:first"
     else:
-        back_cb = "back:first"
+        back_cb = "back:first" if not (first and second) else "back:first"
 
-    # Ask label (if pair exists)
     if first and second:
-        ask_label = user_interface["buttons"]["ask_label_first"] if asked_count == 0 else user_interface["buttons"]["ask_label_more"]
-        rows.append([(user_interface["buttons"]["back_label"], back_cb),
-                     (ask_label, f"ask:{first}:{second}:{days}")])
+        ask_label = user_interface["buttons"]["ask_label_first"] if asked == 0 else user_interface["buttons"]["ask_label_more"]
+        rows.append([(user_interface["buttons"]["back_label"], back_cb), (ask_label, f"ask:{first}:{second}:{days}")])
     else:
         rows.append([(user_interface["buttons"]["back_label"], "back:first")])
 
@@ -242,6 +229,7 @@ def _replace_with_logo(bot, chat_id, message_id, caption=None, reply_markup=None
         with open(LOGO_PATH, "rb") as f:
             media = InputMediaPhoto(f, caption=caption)
             bot.edit_message_media(media=media, chat_id=chat_id, message_id=message_id, reply_markup=reply_markup)
+
     success = _edit_with_retries(try_edit_media, bot, chat_id, message_id, max_attempts=max_attempts, delay=delay)
     if success:
         _save_chat_state(chat_id, message_id, True, last_caption=caption or "", last_markup=_markup_repr(reply_markup))
@@ -255,44 +243,22 @@ def _replace_with_logo(bot, chat_id, message_id, caption=None, reply_markup=None
 
 
 def _send_replace_media(bot, chat_id, message_id, media_path, is_gif, caption, reply_markup):
-    """
-    Try to edit message media; if edit succeeds, update CHAT_STATE with media info.
-    If edit fails and we send a new message, _save_chat_state is called with new msg id and media info as well.
-    Returns True on success, False on fatal error.
-    """
     def try_edit_media():
         with open(media_path, "rb") as f:
-            if is_gif:
-                media = InputMediaAnimation(f, caption=caption)
-            else:
-                media = InputMediaPhoto(f, caption=caption)
+            media = InputMediaAnimation(f, caption=caption) if is_gif else InputMediaPhoto(f, caption=caption)
             bot.edit_message_media(media=media, chat_id=chat_id, message_id=message_id, reply_markup=reply_markup)
 
-    # Attempt to edit existing message
     success = _edit_with_retries(try_edit_media, bot, chat_id, message_id)
     if success:
-        # update CHAT_STATE to reflect new media (edit preserves message_id)
         try:
-            # save last_media paths and media_format so callers and toggle logic stay consistent
             if is_gif:
-                _save_chat_state(chat_id, message_id, False,
-                                 last_caption=caption or "",
-                                 last_markup=_markup_repr(reply_markup),
-                                 last_media=media_path,
-                                 last_media_gif=media_path,
-                                 media_format="gif")
+                _save_chat_state(chat_id, message_id, False, last_caption=caption or "", last_markup=_markup_repr(reply_markup), last_media=media_path, last_media_gif=media_path, media_format="gif")
             else:
-                _save_chat_state(chat_id, message_id, False,
-                                 last_caption=caption or "",
-                                 last_markup=_markup_repr(reply_markup),
-                                 last_media=media_path,
-                                 last_media_png=media_path,
-                                 media_format="png")
+                _save_chat_state(chat_id, message_id, False, last_caption=caption or "", last_markup=_markup_repr(reply_markup), last_media=media_path, last_media_png=media_path, media_format="png")
         except Exception:
             logger.exception("_send_replace_media: failed to update chat state after edit for chat=%s", chat_id)
         return True
 
-    # Edit failed — fallback to sending a new message and deleting the old one
     try:
         with open(media_path, "rb") as f:
             if is_gif:
@@ -303,22 +269,11 @@ def _send_replace_media(bot, chat_id, message_id, media_path, is_gif, caption, r
             bot.delete_message(chat_id=chat_id, message_id=message_id)
         except Exception:
             logger.exception("_send_replace_media: failed to delete old media message chat=%s msg=%s", chat_id, message_id)
-        # save state using new message id and include media paths + format
         try:
             if is_gif:
-                _save_chat_state(chat_id, new_msg.message_id, False,
-                                 last_caption=caption or "",
-                                 last_markup=_markup_repr(reply_markup),
-                                 last_media=new_msg,  # keep original pointer (not used), main fields below
-                                 last_media_gif=media_path,
-                                 media_format="gif")
+                _save_chat_state(chat_id, new_msg.message_id, False, last_caption=caption or "", last_markup=_markup_repr(reply_markup), last_media=new_msg, last_media_gif=media_path, media_format="gif")
             else:
-                _save_chat_state(chat_id, new_msg.message_id, False,
-                                 last_caption=caption or "",
-                                 last_markup=_markup_repr(reply_markup),
-                                 last_media=new_msg,
-                                 last_media_png=media_path,
-                                 media_format="png")
+                _save_chat_state(chat_id, new_msg.message_id, False, last_caption=caption or "", last_markup=_markup_repr(reply_markup), last_media=new_msg, last_media_png=media_path, media_format="png")
         except Exception:
             logger.exception("_send_replace_media: failed to save chat state after send for chat=%s", chat_id)
         return True
@@ -341,7 +296,7 @@ def _send_replace_media(bot, chat_id, message_id, media_path, is_gif, caption, r
 
 
 def call_gemini_advice(question_text: str, summary_text: str):
-    prompt = PROMPT_TEMPLATE + summary_text + "\n\nUser question:\n" + question_text + "\n\nОтвет:"
+    prompt = PROMPT_TEMPLATE + summary_text + "\n\nВопрос пользователя:\n" + question_text + "\n\nОтвет:"
     payload = {"contents": [{"parts": [{"text": prompt}]}]}
     headers = {"Content-Type": "application/json", "x-goog-api-key": GEMINI_API_KEY}
     try:
@@ -380,28 +335,47 @@ def call_gemini_advice(question_text: str, summary_text: str):
         return None
 
 
-def _perform_prediction_and_edit(bot, chat_id, message_id, user_id, first, second, days):
+def _clear_chat_media_and_cache(chat_id):
     try:
         with _get_chat_lock(chat_id):
             state = _get_chat_state(chat_id)
-            for key in ("last_media_png", "last_media_gif"):
+            for key in ("last_media_png", "last_media_gif", "last_media"):
                 p = state.get(key)
-                protected_assets = [LOGO_PATH, ASK_IMG_PATH, AI_THINKING_PATH]
-                if p and os.path.exists(p) and p not in protected_assets:                
+                if isinstance(p, str) and p and not _is_protected_asset(p) and os.path.exists(p):
                     try:
                         os.remove(p)
                     except Exception:
-                        logger.exception("_perform_prediction_and_edit: failed to remove old temp file %s", p)
-            state.pop("cached_all_rates", None)
-            state.pop("cached_pair_key", None)
-            state.pop("forecasted_prices", None)
-            state.pop("forecasted_diffs", None)
-            state.pop("forecast_delta", None)
-            state.pop("advice_text", None)
-            state.pop("forecast_ts", None)
+                        logger.exception("_clear_chat_media_and_cache: failed to remove temp file %s", p)
+            keys_to_pop = [
+                "cached_all_rates",
+                "cached_pair_key",
+                "forecasted_prices",
+                "forecasted_diffs",
+                "forecast_delta",
+                "advice_text",
+                "forecast_ts",
+                "media_format",
+                "last_media_png",
+                "last_media_gif",
+                "last_media",
+                "last_media_png_pred",
+                "last_media_gif_pred",
+                "media_format_at_prediction",
+                "advice_text_pred",
+                "asked_count_at_prediction",
+            ]
+            for k in keys_to_pop:
+                state.pop(k, None)
+            state["awaiting_question"] = False
+            state["qa_history"] = []
+            state["asked_count"] = 0
             CHAT_STATE[chat_id] = state
     except Exception:
-        logger.exception("_perform_prediction_and_edit: failed to clear previous cache for chat=%s", chat_id)
+        logger.exception("_clear_chat_media_and_cache: failed for chat=%s", chat_id)
+
+
+def _perform_prediction_and_edit(bot, chat_id, message_id, user_id, first, second, days):
+    _clear_chat_media_and_cache(chat_id)
     try:
         needed_days = max(MODELS_SETTINGS["reg"]["max_n"], MODELS_SETTINGS["markov"]["max_n"])
     except Exception:
@@ -434,7 +408,7 @@ def _perform_prediction_and_edit(bot, chat_id, message_id, user_id, first, secon
         return
     diffs = [0.0]
     for i in range(1, len(prices)):
-        diffs.append(prices[i] - prices[i-1])
+        diffs.append(prices[i] - prices[i - 1])
     signs = ["+" if d >= 0 else "-" for d in diffs]
     old_prices = prices[-3:] if len(prices) >= 3 else prices[:]
     if not old_prices:
@@ -495,46 +469,46 @@ def _perform_prediction_and_edit(bot, chat_id, message_id, user_id, first, secon
     state = _get_chat_state(chat_id)
     state.setdefault("qa_history", [])
     state.setdefault("asked_count", 0)
-
-    # store asked_count at prediction time so later we can detect "post-question" state
     asked_count_before = state.get("asked_count", 0)
 
-    # default: show GIF when available
-    kb = _kb_for_state({
-        "media_format": "gif",
-        "first": first,
-        "second": second,
-        "days": days,
-        "asked_count": state.get("asked_count", 0),
-        "asked_count_at_prediction": state.get("asked_count_at_prediction", 0)
-    })
+    kb = _kb_for_state(
+        {
+            "media_format": "gif",
+            "first": first,
+            "second": second,
+            "days": days,
+            "asked_count": state.get("asked_count", 0),
+            "asked_count_at_prediction": state.get("asked_count_at_prediction", 0),
+        }
+    )
     success = _send_replace_media(bot, chat_id, message_id, gif_path, is_gif=True, caption=caption, reply_markup=kb)
     if not success:
         return
-    # Save state and also save "snapshot" of media/KB at prediction moment to allow correct restore
-    state.update({
-        "last_media": gif_path,
-        "last_media_png": png_path,
-        "last_media_gif": gif_path,
-        "first": first,
-        "second": second,
-        "days": days,
-        "awaiting_question": False,
-        "forecasted_prices": [float(x) for x in new_prices],
-        "forecasted_diffs": [float(x) for x in adjusted],
-        "forecast_delta": float(delta),
-        "advice_text": caption,
-        "forecast_ts": int(time.time()),
-        "cached_all_rates": all_rates,
-        "cached_pair_key": pair_key,
-        "media_format": "gif",
-        # snapshot fields to restore exactly what was shown at prediction time
-        "asked_count_at_prediction": asked_count_before,
-        "media_format_at_prediction": "gif",
-        "last_media_png_pred": png_path,
-        "last_media_gif_pred": gif_path,
-        "advice_text_pred": caption
-    })
+
+    state.update(
+        {
+            "last_media": gif_path,
+            "last_media_png": png_path,
+            "last_media_gif": gif_path,
+            "first": first,
+            "second": second,
+            "days": days,
+            "awaiting_question": False,
+            "forecasted_prices": [float(x) for x in new_prices],
+            "forecasted_diffs": [float(x) for x in adjusted],
+            "forecast_delta": float(delta),
+            "advice_text": caption,
+            "forecast_ts": int(time.time()),
+            "cached_all_rates": all_rates,
+            "cached_pair_key": pair_key,
+            "media_format": "gif",
+            "asked_count_at_prediction": asked_count_before,
+            "media_format_at_prediction": "gif",
+            "last_media_png_pred": png_path,
+            "last_media_gif_pred": gif_path,
+            "advice_text_pred": caption,
+        }
+    )
     try:
         with _get_chat_lock(chat_id):
             CHAT_STATE[chat_id] = state
@@ -589,14 +563,39 @@ def cb_query(update, context):
                 context.bot.edit_message_caption(chat_id=chat_id, message_id=message_id, caption="Неверный выбор дней")
             _edit_with_retries(try_edit_err, context.bot, chat_id, message_id)
             return
-        def try_edit_predicting():
+        caption_tpl = user_interface["captions"].get("confirm_selection")
+        if caption_tpl:
+            caption = caption_tpl.format(first=first, second=second, days=days)
+        else:
+            caption = f"Валютная пара: {first}/{second}\nКоличество дней: {days}"
+        kb = _kb_confirm(first, second, days)
+        def try_show_confirm():
+            context.bot.edit_message_caption(chat_id=chat_id, message_id=message_id, caption=caption, reply_markup=kb)
+        _edit_with_retries(try_show_confirm, context.bot, chat_id, message_id)
+        return
+
+    if cmd == "confirm" and len(parts) == 4:
+        _, first, second, days_str = parts
+        try:
+            days = int(days_str)
+        except ValueError:
+            def try_edit_err():
+                context.bot.edit_message_caption(chat_id=chat_id, message_id=message_id, caption="Неверный выбор дней")
+            _edit_with_retries(try_edit_err, context.bot, chat_id, message_id)
+            return
+        def try_edit_predicting_caption():
             context.bot.edit_message_caption(chat_id=chat_id, message_id=message_id, caption=user_interface["captions"]["predicting"])
-        _edit_with_retries(try_edit_predicting, context.bot, chat_id, message_id)
+        _edit_with_retries(try_edit_predicting_caption, context.bot, chat_id, message_id)
+        try:
+            if PREDICTING_PATH:
+                _send_replace_media(context.bot, chat_id, message_id, PREDICTING_PATH, is_gif=False, caption=user_interface["captions"]["predicting"], reply_markup=None)
+        except Exception:
+            logger.exception("cb_query.confirm: failed to show predicting image for chat=%s", chat_id)
         _perform_prediction_and_edit(context.bot, chat_id, message_id, user_id, first, second, days)
         return
 
     if cmd == "ask" and len(parts) == 4:
-        _, first, second, days_str = parts
+        _, first, second, _ = parts
         try:
             with _get_chat_lock(chat_id):
                 state = _get_chat_state(chat_id)
@@ -604,7 +603,7 @@ def cb_query(update, context):
                 CHAT_STATE[chat_id] = state
         except Exception:
             logger.exception("cb_query: failed to set awaiting_question for chat=%s", chat_id)
-        cancel_kb = _make_rows([[ (user_interface["buttons"]["cancel_label"], f"cancel_ask") ]])
+        cancel_kb = _make_rows([[(user_interface["buttons"]["cancel_label"], f"cancel_ask")]])
         try:
             _send_replace_media(context.bot, chat_id, message_id, ASK_IMG_PATH, is_gif=False, caption=user_interface["captions"]["ask_question"], reply_markup=cancel_kb)
         except Exception:
@@ -620,12 +619,7 @@ def cb_query(update, context):
         except Exception:
             logger.exception("cb_query: failed to clear awaiting_question for chat=%s", chat_id)
 
-        # Use restore logic: try to restore the prediction media snapshot if present,
-        # otherwise fallback to last media.
-        # Prefer saved prediction snapshot so it matches what user saw after days selection.
         pred_media_format = state.get("media_format_at_prediction") or state.get("media_format")
-        
-        # Определяем пути восстановления
         gif_restore_path = state.get("last_media_gif_pred") or state.get("last_media_gif")
         png_restore_path = state.get("last_media_png_pred") or state.get("last_media_png")
 
@@ -636,93 +630,43 @@ def cb_query(update, context):
             media_path = png_restore_path or gif_restore_path
             is_gif = False
 
-        if not media_path or not os.path.exists(media_path):
+        if not media_path:
             _replace_with_logo(context.bot, chat_id, message_id, caption=state.get("advice_text") or user_interface["captions"]["choose_first"], reply_markup=_kb_first())
             return
 
-        # Build keyboard matching the prediction snapshot's asked_count_at_prediction so toggle shown if it was shown then.
         kb_state = state.copy()
         kb_state["media_format"] = pred_media_format
         kb_state["asked_count"] = state.get("asked_count_at_prediction", state.get("asked_count", 0))
         kb_state["asked_count_at_prediction"] = state.get("asked_count_at_prediction", kb_state["asked_count"])
         kb = _kb_for_state(kb_state)
         caption = state.get("advice_text_pred") or state.get("advice_text", "")
-        
+
         try:
             success = _send_replace_media(context.bot, chat_id, message_id, media_path, is_gif, caption=caption, reply_markup=kb)
-            # --- FIX START: Принудительное восстановление путей к графикам в состоянии ---
             if success:
                 with _get_chat_lock(chat_id):
                     state = _get_chat_state(chat_id)
-                    # Восстанавливаем правильные пути к графикам из snapshot-а (pred),
-                    # чтобы стереть путь к ask_question.png, который записался в last_media_png
                     if state.get("last_media_png_pred"):
                         state["last_media_png"] = state["last_media_png_pred"]
                     if state.get("last_media_gif_pred"):
                         state["last_media_gif"] = state["last_media_gif_pred"]
                     CHAT_STATE[chat_id] = state
-            # --- FIX END ---
         except Exception:
             logger.exception("cb_query: failed to restore media after cancel for chat=%s", chat_id)
         return
 
     if cmd == "back":
-        # back:first -> go to choose first
         if len(parts) >= 2 and parts[1] == "first":
-            try:
-                with _get_chat_lock(chat_id):
-                    state = _get_chat_state(chat_id)
-                    for key in ("last_media_png", "last_media_gif", "last_media"):
-                        p = state.get(key)
-                        if p and os.path.exists(p):
-                            try:
-                                os.remove(p)
-                            except Exception:
-                                logger.exception("cb_query.back:first: failed to remove temp file %s", p)
-                    keys_to_pop = ["cached_all_rates", "cached_pair_key", "forecasted_prices",
-                                   "forecasted_diffs", "forecast_delta", "advice_text", "forecast_ts",
-                                   "media_format", "last_media_png", "last_media_gif", "last_media",
-                                   "last_media_png_pred", "last_media_gif_pred", "media_format_at_prediction", "advice_text_pred", "asked_count_at_prediction"]
-                    for k in keys_to_pop:
-                        state.pop(k, None)
-                    state["awaiting_question"] = False
-                    state["qa_history"] = []
-                    state["asked_count"] = 0
-                    CHAT_STATE[chat_id] = state
-            except Exception:
-                logger.exception("cb_query.back:first: failed to clear cache for chat=%s", chat_id)
+            _clear_chat_media_and_cache(chat_id)
             _replace_with_logo(context.bot, chat_id, message_id, caption=user_interface["captions"]["choose_first"], reply_markup=_kb_first())
             return
 
-        # back:second:<first> -> go back to second-selection screen
         if len(parts) >= 3 and parts[1] == "second":
             first = parts[2]
-            try:
-                with _get_chat_lock(chat_id):
-                    state = _get_chat_state(chat_id)
-                    for key in ("last_media_png", "last_media_gif", "last_media"):
-                        p = state.get(key)
-                        if p and os.path.exists(p):
-                            try:
-                                os.remove(p)
-                            except Exception:
-                                logger.exception("cb_query.back:second: failed to remove temp file %s", p)
-                    keys_to_pop = ["cached_all_rates", "cached_pair_key", "forecasted_prices",
-                                   "forecasted_diffs", "forecast_delta", "advice_text", "forecast_ts",
-                                   "media_format", "last_media_png", "last_media_gif", "last_media",
-                                   "last_media_png_pred", "last_media_gif_pred", "media_format_at_prediction", "advice_text_pred", "asked_count_at_prediction"]
-                    for k in keys_to_pop:
-                        state.pop(k, None)
-                    state["awaiting_question"] = False
-                    state["qa_history"] = []
-                    state["asked_count"] = 0
-                    CHAT_STATE[chat_id] = state
-            except Exception:
-                logger.exception("cb_query.back:second: failed to clear cache for chat=%s", chat_id)
+            _clear_chat_media_and_cache(chat_id)
             _replace_with_logo(context.bot, chat_id, message_id, caption=f"Первая валюта: {first}\n{user_interface['captions']['choose_second']}", reply_markup=_kb_second(first))
             return
 
-        # back:restore -> restore prediction snapshot media (used to return from post-question UI back to graph)
         if len(parts) >= 2 and parts[1] in ("restore", "media"):
             try:
                 with _get_chat_lock(chat_id):
@@ -739,11 +683,10 @@ def cb_query(update, context):
                 media_path = state.get("last_media_png_pred") or state.get("last_media_png") or state.get("last_media_gif")
                 is_gif = False
 
-            if not media_path or not os.path.exists(media_path):
+            if not media_path:
                 _replace_with_logo(context.bot, chat_id, message_id, caption=state.get("advice_text") or user_interface["captions"]["choose_first"], reply_markup=_kb_first())
                 return
 
-            # Build keyboard corresponding to snapshot at prediction time:
             kb_state = state.copy()
             kb_state["media_format"] = pred_media_format
             kb_state["asked_count"] = state.get("asked_count_at_prediction", state.get("asked_count", 0))
@@ -764,37 +707,22 @@ def cb_query(update, context):
             logger.exception("cb_query.toggle: failed to get chat state for chat=%s", chat_id)
             return
 
-        # If awaiting_question or in post-question mode, toggle must be hidden - ignore
-        asked_count = int(state.get("asked_count", 0))
-        asked_at_pred = int(state.get("asked_count_at_prediction", 0)) if state.get("asked_count_at_prediction") is not None else asked_count
-        if state.get("awaiting_question") or (asked_count > asked_at_pred):
+        asked = int(state.get("asked_count", 0))
+        asked_at_pred = int(state.get("asked_count_at_prediction", 0)) if state.get("asked_count_at_prediction") is not None else asked
+        if state.get("awaiting_question") or (asked > asked_at_pred):
             try:
                 query.answer(text="Переключение недоступно в этом состоянии", show_alert=False)
             except Exception:
                 pass
             return
 
-        # 1. Determine current format and target format
         msg_obj = query.message
-        if getattr(msg_obj, "animation", None):
-            current = "gif"
-        elif getattr(msg_obj, "photo", None):
-            current = "png"
-        else:
-            current = state.get("media_format", "gif")
-
+        current = "gif" if getattr(msg_obj, "animation", None) else "png" if getattr(msg_obj, "photo", None) else state.get("media_format", "gif")
         target = "png" if current == "gif" else "gif"
+        media_path = state.get("last_media_png") if target == "png" else state.get("last_media_gif")
+        is_gif = target == "gif"
 
-        # 2. Prepare media path for target
-        if target == "png":
-            media_path = state.get("last_media_png")
-            is_gif = False
-        else:
-            media_path = state.get("last_media_gif")
-            is_gif = True
-
-        # Generate if missing
-        if not media_path or not os.path.exists(media_path):
+        if not media_path or not os.path.exists(media_path) or _is_protected_asset(media_path):
             try:
                 cached_all = state.get("cached_all_rates")
                 pair_key = state.get("cached_pair_key")
@@ -805,12 +733,12 @@ def cb_query(update, context):
                     old_prices = prices[-3:] if len(prices) >= 3 else prices[:]
                 else:
                     forecasted = state.get("forecasted_prices", [])
-                    if forecasted:
-                        old_prices = [forecasted[0]] if forecasted else []
+                    old_prices = [forecasted[0]] if forecasted else []
 
                 if target == "png":
                     media_path = _temp_file(user_id, ext="png")
                     plot_sequence(old_prices, state.get("forecasted_prices", []), media_path)
+                    is_gif = False
                 else:
                     media_path = _temp_file(user_id, ext="gif")
                     try:
@@ -822,24 +750,19 @@ def cb_query(update, context):
                 logger.exception("cb_query.toggle: failed to regenerate media")
                 return
 
-        # 3. Create a temporary state dict to generate the CORRECT future keyboard
         next_state = state.copy()
         next_state["media_format"] = target
-
         kb = _kb_for_state(next_state)
         caption = state.get("advice_text", "")
 
-        # 4. Send
         success = _send_replace_media(context.bot, chat_id, message_id, media_path, is_gif, caption=caption, reply_markup=kb)
 
-        # 5. Update and Save real state
         if success:
             state["media_format"] = target
             if not is_gif:
                 state["last_media_png"] = media_path
             else:
                 state["last_media_gif"] = media_path
-
             try:
                 with _get_chat_lock(chat_id):
                     CHAT_STATE[chat_id] = state
@@ -861,11 +784,8 @@ def question_message_handler(update, context):
         state = _get_chat_state(chat_id)
         if not state.get("awaiting_question"):
             return
-        # mark not awaiting (we will process)
         state["awaiting_question"] = False
-        # store previous asked_count snapshot (so we can detect post-question later)
         state.setdefault("asked_count", 0)
-        # keep asked_count_at_prediction as is; if missing, set to current asked_count
         state.setdefault("asked_count_at_prediction", state.get("asked_count", 0))
         CHAT_STATE[chat_id] = state
     try:
@@ -933,17 +853,12 @@ def question_message_handler(update, context):
             qa_history.append({"q": text, "a": final_caption})
             qa_history = qa_history[-5:]
             state["qa_history"] = qa_history
-            # increment asked_count (we asked assistant)
             state["asked_count"] = state.get("asked_count", 0) + 1
             CHAT_STATE[chat_id] = state
     except Exception:
         logger.exception("question_message_handler: failed to update QA history for chat=%s", chat_id)
     try:
         state = _get_chat_state(chat_id)
-
-        # Build keyboard for the POST-ANSWER screen:
-        # IMPORTANT: For post-answer, toggle must be hidden and back should restore the prediction snapshot.
-        # We'll reuse the stored prediction snapshot fields if present.
         media_format_pred = state.get("media_format_at_prediction") or state.get("media_format")
         if media_format_pred == "gif":
             media_path = state.get("last_media_gif_pred") or state.get("last_media_gif") or state.get("last_media_png")
@@ -952,28 +867,23 @@ def question_message_handler(update, context):
             media_path = state.get("last_media_png_pred") or state.get("last_media_png") or state.get("last_media_gif")
             is_gif = False
 
-        # Build keyboard that will show only ask+back (no toggle) for post-answer state.
         kb_state = state.copy()
-        # media_format remains as actual displayed media format in state (will be overwritten below)
         kb_state["media_format"] = media_format_pred
-        # ensure asked_count_at_prediction is present so _kb_for_state can detect post-question state
         kb_state["asked_count_at_prediction"] = state.get("asked_count_at_prediction", state.get("asked_count", 0))
         kb = _kb_for_state(kb_state)
 
-        if media_path and os.path.exists(media_path):
+        if media_path:
             success = _send_replace_media(context.bot, chat_id, bot_msg_id, media_path, is_gif, caption=final_caption, reply_markup=kb)
             if success:
                 try:
                     with _get_chat_lock(chat_id):
                         state = _get_chat_state(chat_id)
-                        # mark that displayed media is whatever we restored
                         state["media_format"] = "gif" if is_gif else "png"
                         state["last_media"] = media_path
                         if is_gif:
                             state["last_media_gif"] = media_path
                         else:
                             state["last_media_png"] = media_path
-                        # we also keep advice_text / qa history etc
                         CHAT_STATE[chat_id] = state
                 except Exception:
                     logger.exception("question_message_handler: failed to update state after restoring media for chat=%s", chat_id)
@@ -986,24 +896,31 @@ def question_message_handler(update, context):
 
 
 def telegram_main(config: dict):
-    global TELEGRAM_TOKEN, TEMP_FOLDER, LOGO_PATH, MODELS_PATH, MODELS_SETTINGS, CURRENCIES, user_interface, CACHE_TTL, GEMINI_API_KEY, GEMINI_MODEL, GEMINI_URL, PROMPT_TEMPLATE, ASK_IMG_PATH, AI_THINKING_PATH
-    TELEGRAM_TOKEN = config.get('TELEGRAM_TOKEN')
-    TEMP_FOLDER = config.get('TEMP_FOLDER')
-    LOGO_PATH = config.get('LOGO_PATH')
-    ASK_IMG_PATH = config.get('ASK_IMG_PATH')
-    AI_THINKING_PATH = config.get('AI_THINKING_PATH')
-    MODELS_PATH = config.get('MODELS_PATH')
-    MODELS_SETTINGS = config.get('MODELS_SETTINGS')
-    CURRENCIES = config.get('CURRENCIES')
-    user_interface = config.get('user_interface')
-    CACHE_TTL = int(config.get('CACHE_TTL', 300))
-    GEMINI_API_KEY = config.get('GEMINI_API_KEY')
-    GEMINI_MODEL = config.get('GEMINI_MODEL')
-    PROMPT_TEMPLATE = config.get('PROMPT_TEMPLATE')
+    global TELEGRAM_TOKEN, TEMP_FOLDER, LOGO_PATH, MODELS_PATH, MODELS_SETTINGS, CURRENCIES, user_interface, CACHE_TTL, GEMINI_API_KEY, GEMINI_MODEL, GEMINI_URL, PROMPT_TEMPLATE, ASK_IMG_PATH, AI_THINKING_PATH, PREDICTING_PATH
+    TELEGRAM_TOKEN = config.get("TELEGRAM_TOKEN")
+    TEMP_FOLDER = config.get("TEMP_FOLDER")
+    LOGO_PATH = config.get("LOGO_PATH")
+    ASK_IMG_PATH = config.get("ASK_IMG_PATH")
+    AI_THINKING_PATH = config.get("AI_THINKING_PATH")
+    PREDICTING_PATH = config.get("PREDICTING_PATH")
+    MODELS_PATH = config.get("MODELS_PATH")
+    MODELS_SETTINGS = config.get("MODELS_SETTINGS")
+    CURRENCIES = config.get("CURRENCIES")
+    user_interface = config.get("user_interface")
+    CACHE_TTL = int(config.get("CACHE_TTL", 300))
+    GEMINI_API_KEY = config.get("GEMINI_API_KEY")
+    GEMINI_MODEL = config.get("GEMINI_MODEL")
+    PROMPT_TEMPLATE = config.get("PROMPT_TEMPLATE")
     if GEMINI_MODEL:
         GEMINI_URL = f"https://generativelanguage.googleapis.com/v1beta/models/{GEMINI_MODEL}:generateContent"
     if TEMP_FOLDER and os.path.isdir(TEMP_FOLDER):
-        [os.remove(os.path.join(TEMP_FOLDER, f)) for f in os.listdir(TEMP_FOLDER) if os.path.isfile(os.path.join(TEMP_FOLDER, f))]
+        for f in os.listdir(TEMP_FOLDER):
+            p = os.path.join(TEMP_FOLDER, f)
+            if os.path.isfile(p):
+                try:
+                    os.remove(p)
+                except Exception:
+                    logger.exception("telegram_main: failed to clear temp folder file %s", p)
     req = Request(con_pool_size=HTTP_POOL_SIZE, connect_timeout=30, read_timeout=30)
     bot = Bot(token=TELEGRAM_TOKEN, request=req)
     updater = Updater(bot=bot, use_context=True)
