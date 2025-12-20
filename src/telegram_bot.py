@@ -3,6 +3,7 @@ import time
 import threading
 import json
 from datetime import date
+from concurrent.futures import ThreadPoolExecutor
 
 from logging_util import setup_logging, exception_rid
 
@@ -42,6 +43,8 @@ PROMPT_TEMPLATE = None
 
 CHAT_STATE = {}
 CHAT_LOCKS = {}
+
+EXECUTOR = None
 
 
 def _temp_file(uid, ext="png"):
@@ -203,6 +206,40 @@ def _handle_generic_error(bot: Bot, chat_id: int, message_id: int, exc: Exceptio
             _save_chat_state(chat_id, msg.message_id, False, last_caption=caption, last_markup=_markup_repr(markup))
         except Exception:
              logger.exception("Failed to send main menu fallback to chat=%s", chat_id)
+
+
+def _submit_background(bot, chat_id, message_id, fn, *args, **kwargs):
+
+    lock = _get_chat_lock(chat_id)
+    with lock:
+        state = CHAT_STATE.get(chat_id, {})
+        if state.get("running_task"):
+            return False
+        state["running_task"] = True
+        CHAT_STATE[chat_id] = state
+
+    def task_wrapper():
+        try:
+            fn(*args, **kwargs)
+        except Exception as e:
+            raise e
+        finally:
+            with lock:
+                s = CHAT_STATE.get(chat_id, {})
+                s["running_task"] = False
+                CHAT_STATE[chat_id] = s
+
+    future = EXECUTOR.submit(task_wrapper)
+    
+    def done_callback(f):
+        try:
+            f.result()
+        except Exception as exc:
+            if bot:
+                _handle_generic_error(bot, chat_id, message_id, exc)
+
+    future.add_done_callback(done_callback)
+    return True
 
 
 def _send_start_message(bot: Bot, chat_id: int):
@@ -381,6 +418,7 @@ def _clear_chat_media_and_cache(chat_id):
             state["awaiting_question"] = False
             state["qa_history"] = []
             state["asked_count"] = 0
+            state["running_task"] = False
             CHAT_STATE[chat_id] = state
     except Exception:
         logger.exception("_clear_chat_media_and_cache: failed for chat=%s", chat_id)
@@ -533,7 +571,7 @@ def cb_query(update, context):
 
     try:
         try:
-            query.answer(cache_time=2)
+            query.answer(cache_time=0)
         except Exception:
             try:
                 query.answer()
@@ -587,7 +625,7 @@ def cb_query(update, context):
                 days = int(days_str)
             except ValueError:
                  raise ValueError("Invalid days selected")
-            
+
             def try_edit_predicting_caption():
                 context.bot.edit_message_caption(chat_id=chat_id, message_id=message_id, caption=user_interface["captions"]["predicting"])
             _edit_with_retries(try_edit_predicting_caption, context.bot, chat_id, message_id)
@@ -595,7 +633,11 @@ def cb_query(update, context):
             if PREDICTING_PATH:
                 _send_replace_media(context.bot, chat_id, message_id, PREDICTING_PATH, is_gif=False, caption=user_interface["captions"]["predicting"], reply_markup=None)
             
-            _perform_prediction_and_edit(context.bot, chat_id, message_id, user_id, first, second, days)
+            if not _submit_background(context.bot, chat_id, message_id, _perform_prediction_and_edit, context.bot, chat_id, message_id, user_id, first, second, days):
+                try:
+                    query.answer(text="Подождите, выполняется операция...", show_alert=False)
+                except Exception:
+                    pass
             return
 
         if cmd == "ask" and len(parts) == 4:
@@ -689,6 +731,13 @@ def cb_query(update, context):
             with _get_chat_lock(chat_id):
                 state = _get_chat_state(chat_id)
 
+            if state.get("running_task"):
+                 try:
+                    query.answer(text="Обработка...", show_alert=False)
+                 except Exception:
+                    pass
+                 return
+
             asked = int(state.get("asked_count", 0))
             asked_at_pred = int(state.get("asked_count_at_prediction", 0)) if state.get("asked_count_at_prediction") is not None else asked
             if state.get("awaiting_question") or (asked > asked_at_pred):
@@ -704,29 +753,58 @@ def cb_query(update, context):
             media_path = state.get("last_media_png") if target == "png" else state.get("last_media_gif")
             is_gif = target == "gif"
 
+            
+            need_generate = False
             if not media_path or not os.path.exists(media_path) or _is_protected_asset(media_path):
-                cached_all = state.get("cached_all_rates")
-                pair_key = state.get("cached_pair_key")
-                old_prices = []
-                if cached_all and pair_key:
-                    dates = sorted(cached_all.keys())
-                    prices = [float(cached_all[d][pair_key]) for d in dates]
-                    old_prices = prices[-3:] if len(prices) >= 3 else prices[:]
-                else:
-                    forecasted = state.get("forecasted_prices", [])
-                    old_prices = [forecasted[0]] if forecasted else []
+                need_generate = True
+                
+            if need_generate:
+                 def bg_toggle():
+                    with _get_chat_lock(chat_id):
+                         s_curr = _get_chat_state(chat_id)
+                         cached_all = s_curr.get("cached_all_rates")
+                         pair_key = s_curr.get("cached_pair_key")
+                         old_prices = []
+                         if cached_all and pair_key:
+                            dates = sorted(cached_all.keys())
+                            prices = [float(cached_all[d][pair_key]) for d in dates]
+                            old_prices = prices[-3:] if len(prices) >= 3 else prices[:]
+                         else:
+                            forecasted = s_curr.get("forecasted_prices", [])
+                            old_prices = [forecasted[0]] if forecasted else []
 
-                if target == "png":
-                    media_path = _temp_file(user_id, ext="png")
-                    plot_sequence(old_prices, state.get("forecasted_prices", []), media_path)
-                    is_gif = False
-                else:
-                    media_path = _temp_file(user_id, ext="gif")
-                    try:
-                        make_forecast_gif(old_prices, state.get("forecasted_prices", []), media_path)
-                    except Exception:
-                        media_path = state.get("last_media_png") or media_path
-                        is_gif = False
+                         if target == "png":
+                            new_media_path = _temp_file(user_id, ext="png")
+                            plot_sequence(old_prices, s_curr.get("forecasted_prices", []), new_media_path)
+                            new_is_gif = False
+                         else:
+                            new_media_path = _temp_file(user_id, ext="gif")
+                            try:
+                                make_forecast_gif(old_prices, s_curr.get("forecasted_prices", []), new_media_path)
+                                new_is_gif = True
+                            except Exception:
+                                new_media_path = s_curr.get("last_media_png") or new_media_path
+                                new_is_gif = False
+
+                         next_state = s_curr.copy()
+                         next_state["media_format"] = target
+                         kb = _kb_for_state(next_state)
+                         caption = s_curr.get("advice_text", "")
+                    
+                    success = _send_replace_media(context.bot, chat_id, message_id, new_media_path, new_is_gif, caption=caption, reply_markup=kb)
+
+                    if success:
+                        with _get_chat_lock(chat_id):
+                            s_upd = CHAT_STATE.get(chat_id, {})
+                            s_upd["media_format"] = target
+                            if not new_is_gif:
+                                s_upd["last_media_png"] = new_media_path
+                            else:
+                                s_upd["last_media_gif"] = new_media_path
+                            CHAT_STATE[chat_id] = s_upd
+
+                 _submit_background(context.bot, chat_id, message_id, bg_toggle)
+                 return
 
             next_state = state.copy()
             next_state["media_format"] = target
@@ -751,6 +829,113 @@ def cb_query(update, context):
         _handle_generic_error(context.bot, chat_id, message_id, e)
 
 
+def _background_question_logic(bot, chat_id, bot_msg_id, text):
+    """
+    Heavy lifting for question answering: Fetch data, Prepare context, Call Gemini, Send result.
+    Run inside background thread.
+    """
+    with _get_chat_lock(chat_id):
+        state = _get_chat_state(chat_id)
+        first = state.get("first")
+        second = state.get("second")
+        days = int(state.get("days", 1))
+        cached_all = state.get("cached_all_rates")
+        cached_key = state.get("cached_pair_key")
+        ts = state.get("forecast_ts")
+        
+        now_ts = int(time.time())
+        pair_key = f"{second}_per_{first}"
+        
+        use_cached = False
+        if cached_all and cached_key and ts:
+            if cached_key == pair_key and (now_ts - int(ts)) <= CACHE_TTL:
+                use_cached = True
+
+    if use_cached:
+        all_rates = cached_all
+    else:
+        all_rates = fetch_sequences_all_pairs(CURRENCIES, days=max(MODELS_SETTINGS["reg"]["max_n"], MODELS_SETTINGS["markov"]["max_n"]))
+        
+    dates = sorted(all_rates.keys())
+    prices = [float(all_rates[d][pair_key]) for d in dates]
+    last_prices_text = ", ".join(f"{p:.6f}" for p in (prices[-3:] if prices else []))
+    
+    with _get_chat_lock(chat_id):
+        state = _get_chat_state(chat_id)
+        forecasted_prices = state.get("forecasted_prices")
+        forecast_delta = state.get("forecast_delta")
+        qa_history = state.get("qa_history", [])
+
+    history_text = ""
+    if qa_history:
+        parts = []
+        for i, item in enumerate(qa_history[-5:]):
+            q = item.get("q", "")
+            a = item.get("a", "")
+            parts.append(f"Q{i+1}: {q}\nA{i+1}: {a}")
+        history_text = "\n".join(parts) + "\n"
+        
+    if forecasted_prices:
+        forecast_text = ", ".join(f"{p:.6f}" for p in forecasted_prices)
+        if forecast_delta is not None:
+            delta_val = forecast_delta
+        else:
+            delta_val = forecasted_prices[-1] - prices[-1] if prices else 0.0
+
+        summary_text = (
+            f"{history_text}"
+            f"Pair: {first}/{second}\n"
+            f"Latest prices: {last_prices_text}\n"
+            f"Forecast days: {days}\n"
+            f"Forecasted prices: {forecast_text}\n"
+            f"Forecast delta (last vs current): {delta_val:.6f}\n"
+        )
+    else:
+        summary_text = f"{history_text}Pair: {first}/{second}\nLatest prices: {last_prices_text}\nForecast days: {days}\n"
+        
+    gemini_resp = call_gemini_advice(text, summary_text)
+    final_caption = gemini_resp if gemini_resp else "Ассистент не смог предоставить ответ (ошибка подключения к модели)."
+    
+    with _get_chat_lock(chat_id):
+        state = _get_chat_state(chat_id)
+        qa_history = state.get("qa_history", [])
+        qa_history.append({"q": text, "a": final_caption})
+        qa_history = qa_history[-5:]
+        state["qa_history"] = qa_history
+        state["asked_count"] = state.get("asked_count", 0) + 1
+        CHAT_STATE[chat_id] = state
+        
+        media_format_pred = state.get("media_format_at_prediction") or state.get("media_format")
+        if media_format_pred == "gif":
+            media_path = state.get("last_media_gif_pred") or state.get("last_media_gif") or state.get("last_media_png")
+            is_gif = bool(state.get("last_media_gif_pred") or state.get("last_media_gif"))
+        else:
+            media_path = state.get("last_media_png_pred") or state.get("last_media_png") or state.get("last_media_gif")
+            is_gif = False
+
+        kb_state = state.copy()
+        kb_state["media_format"] = media_format_pred
+        kb_state["asked_count_at_prediction"] = state.get("asked_count_at_prediction", state.get("asked_count", 0))
+        kb = _kb_for_state(kb_state)
+
+    if media_path:
+        success = _send_replace_media(bot, chat_id, bot_msg_id, media_path, is_gif, caption=final_caption, reply_markup=kb)
+        if success:
+            with _get_chat_lock(chat_id):
+                state = _get_chat_state(chat_id)
+                state["media_format"] = "gif" if is_gif else "png"
+                state["last_media"] = media_path
+                if is_gif:
+                    state["last_media_gif"] = media_path
+                else:
+                    state["last_media_png"] = media_path
+                CHAT_STATE[chat_id] = state
+    else:
+        def try_edit_final():
+            bot.edit_message_caption(chat_id=chat_id, message_id=bot_msg_id, caption=final_caption, reply_markup=kb)
+        _edit_with_retries(try_edit_final, bot, chat_id, bot_msg_id)
+
+
 def question_message_handler(update, context):
     msg = update.message
     chat_id = msg.chat.id
@@ -770,6 +955,9 @@ def question_message_handler(update, context):
             state = _get_chat_state(chat_id)
             if not state.get("awaiting_question"):
                 return
+            if state.get("running_task"):
+                return
+
             state["awaiting_question"] = False
             state.setdefault("asked_count", 0)
             state.setdefault("asked_count_at_prediction", state.get("asked_count", 0))
@@ -779,103 +967,9 @@ def question_message_handler(update, context):
         
         _send_replace_media(context.bot, chat_id, bot_msg_id, AI_THINKING_PATH, is_gif=False, caption=user_interface["captions"]["awaiting_assistant"], reply_markup=None)
 
-        first = state.get("first")
-        second = state.get("second")
-        days = int(state.get("days", 1))
-        cached_all = state.get("cached_all_rates")
-        cached_key = state.get("cached_pair_key")
-        ts = state.get("forecast_ts")
-        now_ts = int(time.time())
-        pair_key = f"{second}_per_{first}"
-        
-        use_cached = False
-        if cached_all and cached_key and ts:
-            if cached_key == pair_key and (now_ts - int(ts)) <= CACHE_TTL:
-                use_cached = True
-                
-        if use_cached:
-            all_rates = cached_all
-        else:
-            all_rates = fetch_sequences_all_pairs(CURRENCIES, days=max(MODELS_SETTINGS["reg"]["max_n"], MODELS_SETTINGS["markov"]["max_n"]))
-            
-        dates = sorted(all_rates.keys())
-        prices = [float(all_rates[d][pair_key]) for d in dates]
+        if not _submit_background(context.bot, chat_id, bot_msg_id, _background_question_logic, context.bot, chat_id, bot_msg_id, text):
+             pass
 
-        last_prices_text = ", ".join(f"{p:.6f}" for p in (prices[-3:] if prices else []))
-        forecasted_prices = state.get("forecasted_prices")
-        forecast_delta = state.get("forecast_delta")
-        
-        qa_history = state.get("qa_history", [])
-        history_text = ""
-        if qa_history:
-            parts = []
-            for i, item in enumerate(qa_history[-5:]):
-                q = item.get("q", "")
-                a = item.get("a", "")
-                parts.append(f"Q{i+1}: {q}\nA{i+1}: {a}")
-            history_text = "\n".join(parts) + "\n"
-            
-        if forecasted_prices:
-            forecast_text = ", ".join(f"{p:.6f}" for p in forecasted_prices)
-            if forecast_delta is not None:
-                delta_val = forecast_delta
-            else:
-                 delta_val = forecasted_prices[-1] - prices[-1] if prices else 0.0
-
-            summary_text = (
-                f"{history_text}"
-                f"Pair: {first}/{second}\n"
-                f"Latest prices: {last_prices_text}\n"
-                f"Forecast days: {days}\n"
-                f"Forecasted prices: {forecast_text}\n"
-                f"Forecast delta (last vs current): {delta_val:.6f}\n"
-            )
-        else:
-            summary_text = f"{history_text}Pair: {first}/{second}\nLatest prices: {last_prices_text}\nForecast days: {days}\n"
-            
-        gemini_resp = call_gemini_advice(text, summary_text)
-        final_caption = gemini_resp if gemini_resp else "Ассистент не смог предоставить ответ (ошибка подключения к модели)."
-        
-        with _get_chat_lock(chat_id):
-            state = _get_chat_state(chat_id)
-            qa_history = state.get("qa_history", [])
-            qa_history.append({"q": text, "a": final_caption})
-            qa_history = qa_history[-5:]
-            state["qa_history"] = qa_history
-            state["asked_count"] = state.get("asked_count", 0) + 1
-            CHAT_STATE[chat_id] = state
-            
-        state = _get_chat_state(chat_id)
-        media_format_pred = state.get("media_format_at_prediction") or state.get("media_format")
-        if media_format_pred == "gif":
-            media_path = state.get("last_media_gif_pred") or state.get("last_media_gif") or state.get("last_media_png")
-            is_gif = bool(state.get("last_media_gif_pred") or state.get("last_media_gif"))
-        else:
-            media_path = state.get("last_media_png_pred") or state.get("last_media_png") or state.get("last_media_gif")
-            is_gif = False
-
-        kb_state = state.copy()
-        kb_state["media_format"] = media_format_pred
-        kb_state["asked_count_at_prediction"] = state.get("asked_count_at_prediction", state.get("asked_count", 0))
-        kb = _kb_for_state(kb_state)
-
-        if media_path:
-            success = _send_replace_media(context.bot, chat_id, bot_msg_id, media_path, is_gif, caption=final_caption, reply_markup=kb)
-            if success:
-                with _get_chat_lock(chat_id):
-                    state = _get_chat_state(chat_id)
-                    state["media_format"] = "gif" if is_gif else "png"
-                    state["last_media"] = media_path
-                    if is_gif:
-                        state["last_media_gif"] = media_path
-                    else:
-                        state["last_media_png"] = media_path
-                    CHAT_STATE[chat_id] = state
-        else:
-            def try_edit_final():
-                context.bot.edit_message_caption(chat_id=chat_id, message_id=bot_msg_id, caption=final_caption, reply_markup=kb)
-            _edit_with_retries(try_edit_final, context.bot, chat_id, bot_msg_id)
-            
     except Exception as e:
         bot_msg_id = CHAT_STATE.get(chat_id, {}).get("msg_id")
         _handle_generic_error(context.bot, chat_id, bot_msg_id, e)
@@ -883,6 +977,8 @@ def question_message_handler(update, context):
 
 def telegram_main(config: dict):
     global TELEGRAM_TOKEN, TEMP_FOLDER, LOGO_PATH, MODELS_PATH, MODELS_SETTINGS, CURRENCIES, user_interface, CACHE_TTL, GEMINI_API_KEY, GEMINI_MODEL, GEMINI_URL, PROMPT_TEMPLATE, ASK_IMG_PATH, AI_THINKING_PATH, PREDICTING_PATH
+    global EXECUTOR
+    
     TELEGRAM_TOKEN = config.get("TELEGRAM_TOKEN")
     TEMP_FOLDER = config.get("TEMP_FOLDER")
     LOGO_PATH = config.get("LOGO_PATH")
@@ -897,6 +993,7 @@ def telegram_main(config: dict):
     GEMINI_API_KEY = config.get("GEMINI_API_KEY")
     GEMINI_MODEL = config.get("GEMINI_MODEL")
     PROMPT_TEMPLATE = config.get("PROMPT_TEMPLATE")
+    
     if GEMINI_MODEL:
         GEMINI_URL = f"https://generativelanguage.googleapis.com/v1beta/models/{GEMINI_MODEL}:generateContent"
     if TEMP_FOLDER and os.path.isdir(TEMP_FOLDER):
@@ -907,6 +1004,9 @@ def telegram_main(config: dict):
                     os.remove(p)
                 except Exception:
                     logger.exception("telegram_main: failed to clear temp folder file %s", p)
+    
+    EXECUTOR = ThreadPoolExecutor(max_workers=os.cpu_count())
+
     req = Request(con_pool_size=HTTP_POOL_SIZE, connect_timeout=30, read_timeout=30)
     bot = Bot(token=TELEGRAM_TOKEN, request=req)
     updater = Updater(bot=bot, use_context=True)
@@ -914,5 +1014,10 @@ def telegram_main(config: dict):
     dp.add_handler(CommandHandler("start", start_handler))
     dp.add_handler(CallbackQueryHandler(cb_query))
     dp.add_handler(MessageHandler(Filters.text & (~Filters.command), question_message_handler))
+    
     updater.start_polling()
-    updater.idle()
+    try:
+        updater.idle()
+    finally:
+        if EXECUTOR:
+            EXECUTOR.shutdown(wait=False)
