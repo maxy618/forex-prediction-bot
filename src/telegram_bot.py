@@ -4,7 +4,6 @@ import threading
 import json
 from datetime import date
 from concurrent.futures import ThreadPoolExecutor
-
 from logging_util import setup_logging, exception_rid
 
 logger = setup_logging(level="debug", name=__name__)
@@ -88,6 +87,19 @@ def _protected_assets():
 
 def _is_protected_asset(path):
     return isinstance(path, str) and path in _protected_assets()
+
+
+def _is_generated_media(path):
+    try:
+        if not isinstance(path, str):
+            return False
+        if not TEMP_FOLDER:
+            return False
+        abs_temp = os.path.abspath(TEMP_FOLDER)
+        abs_path = os.path.abspath(path)
+        return abs_path.startswith(abs_temp)
+    except Exception:
+        return False
 
 
 def _kb_first():
@@ -178,24 +190,19 @@ def _kb_for_state(state):
 
 def _handle_generic_error(bot: Bot, chat_id: int, message_id: int, exc: Exception):
     rid = exception_rid(logger, "Generic Error Handler caught exception", exc=exc)
-
     try:
         if message_id:
             bot.delete_message(chat_id=chat_id, message_id=message_id)
     except Exception:
         pass
-
     err_text = user_interface['captions']['unexpected_error']
     try:
         bot.send_message(chat_id=chat_id, text=f"{err_text} (id: {rid})")
     except Exception:
         logger.exception("Failed to send error text to chat=%s", chat_id)
-
     _clear_chat_media_and_cache(chat_id)
-    
     caption = user_interface["captions"]["choose_first"]
     markup = _kb_first()
-    
     try:
         with open(LOGO_PATH, "rb") as f:
             msg = bot.send_photo(chat_id=chat_id, photo=f, caption=caption, reply_markup=markup)
@@ -209,7 +216,6 @@ def _handle_generic_error(bot: Bot, chat_id: int, message_id: int, exc: Exceptio
 
 
 def _submit_background(bot, chat_id, message_id, fn, *args, **kwargs):
-
     lock = _get_chat_lock(chat_id)
     with lock:
         state = CHAT_STATE.get(chat_id, {})
@@ -230,14 +236,12 @@ def _submit_background(bot, chat_id, message_id, fn, *args, **kwargs):
                 CHAT_STATE[chat_id] = s
 
     future = EXECUTOR.submit(task_wrapper)
-    
     def done_callback(f):
         try:
             f.result()
         except Exception as exc:
             if bot:
                 _handle_generic_error(bot, chat_id, message_id, exc)
-
     future.add_done_callback(done_callback)
     return True
 
@@ -277,7 +281,6 @@ def _edit_with_retries(action_callable, bot: Bot, chat_id: int, message_id: int,
                 last_exc = e
             if attempt < max_attempts:
                 time.sleep(delay)
-    
     _handle_generic_error(bot, chat_id, message_id, last_exc or Exception("Edit retries failed"))
     return False
 
@@ -287,37 +290,112 @@ def _replace_with_logo(bot, chat_id, message_id, caption=None, reply_markup=None
         with open(LOGO_PATH, "rb") as f:
             media = InputMediaPhoto(f, caption=caption)
             bot.edit_message_media(media=media, chat_id=chat_id, message_id=message_id, reply_markup=reply_markup)
-
     success = _edit_with_retries(try_edit_media, bot, chat_id, message_id, max_attempts=max_attempts, delay=delay)
     if success:
         _save_chat_state(chat_id, message_id, True, last_caption=caption or "", last_markup=_markup_repr(reply_markup))
         return
-    
     return
 
 
-def _send_replace_media(bot, chat_id, message_id, media_path, is_gif, caption, reply_markup):
-    def try_edit_media():
-        with open(media_path, "rb") as f:
-            media = InputMediaAnimation(f, caption=caption) if is_gif else InputMediaPhoto(f, caption=caption)
-            bot.edit_message_media(media=media, chat_id=chat_id, message_id=message_id, reply_markup=reply_markup)
-
-    lock = _get_chat_lock(chat_id)
+def _save_media_state(chat_id, new_msg, media_path, is_gif):
     try:
-        with lock:
-            try_edit_media()
-        try:
+        if not _is_generated_media(media_path):
+            return
+        with _get_chat_lock(chat_id):
+            s = _get_chat_state(chat_id)
+            s["last_media"] = media_path
             if is_gif:
-                _save_chat_state(chat_id, message_id, False, last_caption=caption or "", last_markup=_markup_repr(reply_markup), last_media=media_path, last_media_gif=media_path, media_format="gif")
+                fid = None
+                if getattr(new_msg, "animation", None):
+                    fid = new_msg.animation.file_id
+                elif getattr(new_msg, "document", None) and getattr(new_msg.document, "file_id", None):
+                    fid = new_msg.document.file_id
+                s["last_media_gif"] = media_path
+                if fid:
+                    s["last_media_gif_file_id"] = fid
             else:
-                _save_chat_state(chat_id, message_id, False, last_caption=caption or "", last_markup=_markup_repr(reply_markup), last_media=media_path, last_media_png=media_path, media_format="png")
-        except Exception:
-             pass
-        return True
+                fid = None
+                if getattr(new_msg, "photo", None):
+                    try:
+                        fid = new_msg.photo[-1].file_id
+                    except Exception:
+                        fid = None
+                elif getattr(new_msg, "document", None) and getattr(new_msg.document, "file_id", None):
+                    fid = new_msg.document.file_id
+                s["last_media_png"] = media_path
+                if fid:
+                    s["last_media_png_file_id"] = fid
+            CHAT_STATE[chat_id] = s
+    except Exception:
+        logger.exception("_save_media_state: failed to save media info for chat=%s", chat_id)
+
+
+def _send_replace_media(bot, chat_id, message_id, media_path, is_gif, caption, reply_markup):
+    def _is_file_id(m):
+        return isinstance(m, str) and (not os.path.exists(m)) and (not _is_protected_asset(m))
+    try:
+        if _is_file_id(media_path):
+            media = InputMediaAnimation(media=media_path, caption=caption) if is_gif else InputMediaPhoto(media=media_path, caption=caption)
+            bot.edit_message_media(media=media, chat_id=chat_id, message_id=message_id, reply_markup=reply_markup)
+            try:
+                if _is_generated_media(media_path):
+                    with _get_chat_lock(chat_id):
+                        s = _get_chat_state(chat_id)
+                        s["last_media"] = media_path
+                        if is_gif:
+                            s["last_media_gif_file_id"] = media_path
+                        else:
+                            s["last_media_png_file_id"] = media_path
+                        s["last_caption"] = caption or ""
+                        s["last_markup"] = _markup_repr(reply_markup)
+                        CHAT_STATE[chat_id] = s
+            except Exception:
+                pass
+            return True
+
+        if _is_protected_asset(media_path):
+            try:
+                with open(media_path, "rb") as f:
+                    media = InputMediaAnimation(f, caption=caption) if is_gif else InputMediaPhoto(f, caption=caption)
+                    bot.edit_message_media(media=media, chat_id=chat_id, message_id=message_id, reply_markup=reply_markup)
+                return True
+            except BadRequest as be:
+                msg = str(be)
+                if "Message is not modified" in msg:
+                    return True
+
+        def try_edit_media_local():
+            with open(media_path, "rb") as f:
+                media = InputMediaAnimation(f, caption=caption) if is_gif else InputMediaPhoto(f, caption=caption)
+                bot.edit_message_media(media=media, chat_id=chat_id, message_id=message_id, reply_markup=reply_markup)
+
+        lock = _get_chat_lock(chat_id)
+        try:
+            with lock:
+                try_edit_media_local()
+            if not _is_protected_asset(media_path) and _is_generated_media(media_path):
+                try:
+                    with _get_chat_lock(chat_id):
+                        s = _get_chat_state(chat_id)
+                        s["last_media"] = media_path
+                        if is_gif:
+                            s["last_media_gif"] = media_path
+                        else:
+                            s["last_media_png"] = media_path
+                        s["last_caption"] = caption or ""
+                        s["last_markup"] = _markup_repr(reply_markup)
+                        CHAT_STATE[chat_id] = s
+                except Exception:
+                    pass
+            return True
+        except BadRequest as be:
+            msg = str(be)
+            if "Message is not modified" in msg:
+                return True
     except BadRequest as be:
         msg = str(be)
         if "Message is not modified" in msg:
-             return True
+            return True
     except Exception:
         pass
 
@@ -327,17 +405,56 @@ def _send_replace_media(bot, chat_id, message_id, media_path, is_gif, caption, r
         except Exception:
             pass
 
+        if _is_file_id(media_path):
+            if is_gif:
+                new_msg = bot.send_animation(chat_id=chat_id, animation=media_path, caption=caption, reply_markup=reply_markup)
+            else:
+                new_msg = bot.send_photo(chat_id=chat_id, photo=media_path, caption=caption, reply_markup=reply_markup)
+            try:
+                if _is_generated_media(media_path):
+                    with _get_chat_lock(chat_id):
+                        s = _get_chat_state(chat_id)
+                        if is_gif:
+                            s["last_media_gif_file_id"] = media_path
+                            s["last_media_gif"] = media_path
+                        else:
+                            s["last_media_png_file_id"] = media_path
+                            s["last_media_png"] = media_path
+                        s["last_media"] = media_path
+                        s["msg_id"] = new_msg.message_id
+                        s["last_caption"] = caption or ""
+                        s["last_markup"] = _markup_repr(reply_markup)
+                        CHAT_STATE[chat_id] = s
+            except Exception:
+                pass
+            return True
+
+        if _is_protected_asset(media_path):
+            try:
+                with open(media_path, "rb") as f:
+                    if is_gif:
+                        new_msg = bot.send_animation(chat_id=chat_id, animation=f, caption=caption, reply_markup=reply_markup)
+                    else:
+                        new_msg = bot.send_photo(chat_id=chat_id, photo=f, caption=caption, reply_markup=reply_markup)
+                return True
+            except Exception as e:
+                _handle_generic_error(bot, chat_id, message_id, e)
+                return False
+
         with open(media_path, "rb") as f:
             if is_gif:
                 new_msg = bot.send_animation(chat_id=chat_id, animation=f, caption=caption, reply_markup=reply_markup)
             else:
                 new_msg = bot.send_photo(chat_id=chat_id, photo=f, caption=caption, reply_markup=reply_markup)
-        
+
         try:
-            if is_gif:
-                _save_chat_state(chat_id, new_msg.message_id, False, last_caption=caption or "", last_markup=_markup_repr(reply_markup), last_media=new_msg, last_media_gif=media_path, media_format="gif")
-            else:
-                _save_chat_state(chat_id, new_msg.message_id, False, last_caption=caption or "", last_markup=_markup_repr(reply_markup), last_media=new_msg, last_media_png=media_path, media_format="png")
+            _save_media_state(chat_id, new_msg, media_path, is_gif)
+            with _get_chat_lock(chat_id):
+                s = _get_chat_state(chat_id)
+                s["msg_id"] = new_msg.message_id
+                s["last_caption"] = caption or ""
+                s["last_markup"] = _markup_repr(reply_markup)
+                CHAT_STATE[chat_id] = s
         except Exception:
             pass
         return True
@@ -430,31 +547,31 @@ def _perform_prediction_and_edit(bot, chat_id, message_id, user_id, first, secon
         needed_days = max(MODELS_SETTINGS["reg"]["max_n"], MODELS_SETTINGS["markov"]["max_n"])
     except Exception:
         needed_days = days if days > 0 else 10
-    
+
     all_rates = fetch_sequences_all_pairs(CURRENCIES, days=needed_days)
-    
+
     pair_key = f"{second}_per_{first}"
     dates = sorted(all_rates.keys())
     prices = []
-    
+
     for d in dates:
         day_rates = all_rates[d]
         if pair_key not in day_rates:
             raise RuntimeError(f"Pair {pair_key} missing in data for {d}")
         prices.append(float(day_rates[pair_key]))
-    
+
     if not prices:
         raise ValueError("Prices list is empty after fetch")
-        
+
     diffs = [0.0]
     for i in range(1, len(prices)):
         diffs.append(prices[i] - prices[i - 1])
     signs = ["+" if d >= 0 else "-" for d in diffs]
     old_prices = prices[-3:] if len(prices) >= 3 else prices[:]
-    
+
     if not old_prices:
         raise ValueError("Not enough data to plot")
-        
+
     last_price = old_prices[-1]
     reg_models = []
     markov_models = []
@@ -465,14 +582,14 @@ def _perform_prediction_and_edit(bot, chat_id, message_id, user_id, first, secon
         p2 = os.path.join(MODELS_PATH, f"markov_{first}{second}_{n}.pkl")
         if os.path.exists(p2):
             markov_models.append(load_model(p2))
-            
+
     max_nlags = max([len(c) - 1 for c in reg_models]) if reg_models else 1
     max_nlags = min(max_nlags, len(diffs))
     last_diffs = diffs[-max_nlags:] if len(diffs) >= max_nlags else diffs[:]
-    
+
     forecasted_diffs = forecast_diffs(last_diffs, reg_models, days) if reg_models else [0.0] * days
     forecasted_signs = forecast_signs(signs, markov_models, days) if markov_models else [None] * days
-    
+
     adjusted = []
     for d, s in zip(forecasted_diffs, forecasted_signs):
         if s == "-":
@@ -481,23 +598,23 @@ def _perform_prediction_and_edit(bot, chat_id, message_id, user_id, first, secon
             adjusted.append(abs(d))
         else:
             adjusted.append(d)
-    
+
     cur = last_price
     new_prices = []
     for d in adjusted:
         cur = cur + d
         new_prices.append(cur)
-        
+
     png_path = _temp_file(user_id, ext="png")
     plot_sequence(old_prices, new_prices, png_path)
     gif_path = _temp_file(user_id, ext="gif")
-    
+
     try:
         make_forecast_gif(old_prices, new_prices, gif_path)
     except Exception:
         logger.warning("GIF creation failed, using PNG")
         gif_path = png_path
-        
+
     delta = new_prices[-1] - last_price
     delta_percent = (delta / last_price) * 100 if last_price != 0 else 0
     arrow = "↑" if delta > 0 else "↓" if delta < 0 else "→"
@@ -531,33 +648,36 @@ def _perform_prediction_and_edit(bot, chat_id, message_id, user_id, first, secon
     if not success:
         raise RuntimeError("Failed to send prediction media")
 
-    state.update(
-        {
-            "last_media": gif_path,
-            "last_media_png": png_path,
-            "last_media_gif": gif_path,
-            "first": first,
-            "second": second,
-            "days": days,
-            "awaiting_question": False,
-            "forecasted_prices": [float(x) for x in new_prices],
-            "forecasted_diffs": [float(x) for x in adjusted],
-            "forecast_delta": float(delta),
-            "advice_text": caption,
-            "forecast_ts": int(time.time()),
-            "cached_all_rates": all_rates,
-            "cached_pair_key": pair_key,
-            "media_format": "gif",
-            "asked_count_at_prediction": asked_count_before,
-            "media_format_at_prediction": "gif",
-            "last_media_png_pred": png_path,
-            "last_media_gif_pred": gif_path,
-            "advice_text_pred": caption,
-        }
-    )
     try:
         with _get_chat_lock(chat_id):
-            CHAT_STATE[chat_id] = state
+            current = _get_chat_state(chat_id)
+            current.update(
+                {
+                    "first": first,
+                    "second": second,
+                    "days": days,
+                    "awaiting_question": False,
+                    "forecasted_prices": [float(x) for x in new_prices],
+                    "forecasted_diffs": [float(x) for x in adjusted],
+                    "forecast_delta": float(delta),
+                    "advice_text": caption,
+                    "forecast_ts": int(time.time()),
+                    "cached_all_rates": all_rates,
+                    "cached_pair_key": pair_key,
+                    "media_format": "gif",
+                    "asked_count_at_prediction": asked_count_before,
+                    "media_format_at_prediction": "gif",
+                    "last_media_png_pred": png_path,
+                    "last_media_gif_pred": gif_path,
+                    "advice_text_pred": caption,
+                }
+            )
+            current["last_media"] = current.get("last_media", gif_path)
+            if not current.get("last_media_gif"):
+                current["last_media_gif"] = gif_path
+            if not current.get("last_media_png"):
+                current["last_media_png"] = png_path
+            CHAT_STATE[chat_id] = current
     except Exception:
         pass
 
@@ -629,10 +749,10 @@ def cb_query(update, context):
             def try_edit_predicting_caption():
                 context.bot.edit_message_caption(chat_id=chat_id, message_id=message_id, caption=user_interface["captions"]["predicting"])
             _edit_with_retries(try_edit_predicting_caption, context.bot, chat_id, message_id)
-            
+
             if PREDICTING_PATH:
                 _send_replace_media(context.bot, chat_id, message_id, PREDICTING_PATH, is_gif=False, caption=user_interface["captions"]["predicting"], reply_markup=None)
-            
+
             if not _submit_background(context.bot, chat_id, message_id, _perform_prediction_and_edit, context.bot, chat_id, message_id, user_id, first, second, days):
                 try:
                     query.answer(text="Подождите, выполняется операция...", show_alert=False)
@@ -646,7 +766,7 @@ def cb_query(update, context):
                 state = _get_chat_state(chat_id)
                 state.update({"awaiting_question": True})
                 CHAT_STATE[chat_id] = state
-            
+
             cancel_kb = _make_rows([[(user_interface["buttons"]["cancel_label"], f"cancel_ask")]])
             _send_replace_media(context.bot, chat_id, message_id, ASK_IMG_PATH, is_gif=False, caption=user_interface["captions"]["ask_question"], reply_markup=cancel_kb)
             return
@@ -658,14 +778,14 @@ def cb_query(update, context):
                 CHAT_STATE[chat_id] = state
 
             pred_media_format = state.get("media_format_at_prediction") or state.get("media_format")
-            gif_restore_path = state.get("last_media_gif_pred") or state.get("last_media_gif")
-            png_restore_path = state.get("last_media_png_pred") or state.get("last_media_png")
+            gif_restore = state.get("last_media_gif_pred_file_id") or state.get("last_media_gif_pred") or state.get("last_media_gif_file_id") or state.get("last_media_gif")
+            png_restore = state.get("last_media_png_pred_file_id") or state.get("last_media_png_pred") or state.get("last_media_png_file_id") or state.get("last_media_png")
 
             if pred_media_format == "gif":
-                media_path = gif_restore_path or png_restore_path
-                is_gif = bool(gif_restore_path)
+                media_path = gif_restore or png_restore
+                is_gif = bool(gif_restore)
             else:
-                media_path = png_restore_path or gif_restore_path
+                media_path = png_restore or gif_restore
                 is_gif = False
 
             if not media_path:
@@ -708,10 +828,10 @@ def cb_query(update, context):
 
                 pred_media_format = state.get("media_format_at_prediction") or state.get("media_format")
                 if pred_media_format == "gif":
-                    media_path = state.get("last_media_gif_pred") or state.get("last_media_gif") or state.get("last_media_png")
-                    is_gif = bool(state.get("last_media_gif_pred") or state.get("last_media_gif"))
+                    media_path = state.get("last_media_gif_pred_file_id") or state.get("last_media_gif_pred") or state.get("last_media_gif_file_id") or state.get("last_media_gif") or state.get("last_media_png")
+                    is_gif = bool(state.get("last_media_gif_pred_file_id") or state.get("last_media_gif_pred") or state.get("last_media_gif_file_id") or state.get("last_media_gif"))
                 else:
-                    media_path = state.get("last_media_png_pred") or state.get("last_media_png") or state.get("last_media_gif")
+                    media_path = state.get("last_media_png_pred_file_id") or state.get("last_media_png_pred") or state.get("last_media_png_file_id") or state.get("last_media_png") or state.get("last_media_gif")
                     is_gif = False
 
                 if not media_path:
@@ -750,14 +870,20 @@ def cb_query(update, context):
             msg_obj = query.message
             current = "gif" if getattr(msg_obj, "animation", None) else "png" if getattr(msg_obj, "photo", None) else state.get("media_format", "gif")
             target = "png" if current == "gif" else "gif"
-            media_path = state.get("last_media_png") if target == "png" else state.get("last_media_gif")
-            is_gif = target == "gif"
 
-            
-            need_generate = False
-            if not media_path or not os.path.exists(media_path) or _is_protected_asset(media_path):
-                need_generate = True
-                
+            if target == "png":
+                media_candidate = state.get("last_media_png_file_id") or state.get("last_media_png")
+            else:
+                media_candidate = state.get("last_media_gif_file_id") or state.get("last_media_gif")
+
+            def _has_media_for_target():
+                if target == "png":
+                    return bool(state.get("last_media_png_file_id") or (state.get("last_media_png") and os.path.exists(state.get("last_media_png"))))
+                else:
+                    return bool(state.get("last_media_gif_file_id") or (state.get("last_media_gif") and os.path.exists(state.get("last_media_gif"))))
+
+            need_generate = not _has_media_for_target()
+
             if need_generate:
                  def bg_toggle():
                     with _get_chat_lock(chat_id):
@@ -790,7 +916,7 @@ def cb_query(update, context):
                          next_state["media_format"] = target
                          kb = _kb_for_state(next_state)
                          caption = s_curr.get("advice_text", "")
-                    
+
                     success = _send_replace_media(context.bot, chat_id, message_id, new_media_path, new_is_gif, caption=caption, reply_markup=kb)
 
                     if success:
@@ -811,16 +937,23 @@ def cb_query(update, context):
             kb = _kb_for_state(next_state)
             caption = state.get("advice_text", "")
 
-            success = _send_replace_media(context.bot, chat_id, message_id, media_path, is_gif, caption=caption, reply_markup=kb)
+            success = _send_replace_media(context.bot, chat_id, message_id, media_candidate, target == "gif", caption=caption, reply_markup=kb)
 
             if success:
-                state["media_format"] = target
-                if not is_gif:
-                    state["last_media_png"] = media_path
-                else:
-                    state["last_media_gif"] = media_path
                 with _get_chat_lock(chat_id):
-                    CHAT_STATE[chat_id] = state
+                    st = _get_chat_state(chat_id)
+                    st["media_format"] = target
+                    if target == "gif":
+                        if media_candidate:
+                            st["last_media_gif"] = media_candidate
+                            if isinstance(media_candidate, str) and not os.path.exists(media_candidate):
+                                st["last_media_gif_file_id"] = media_candidate
+                    else:
+                        if media_candidate:
+                            st["last_media_png"] = media_candidate
+                            if isinstance(media_candidate, str) and not os.path.exists(media_candidate):
+                                st["last_media_png_file_id"] = media_candidate
+                    CHAT_STATE[chat_id] = st
             return
 
         query.answer(text="Неизвестная команда", show_alert=False)
@@ -830,10 +963,6 @@ def cb_query(update, context):
 
 
 def _background_question_logic(bot, chat_id, bot_msg_id, text):
-    """
-    Heavy lifting for question answering: Fetch data, Prepare context, Call Gemini, Send result.
-    Run inside background thread.
-    """
     with _get_chat_lock(chat_id):
         state = _get_chat_state(chat_id)
         first = state.get("first")
@@ -842,10 +971,10 @@ def _background_question_logic(bot, chat_id, bot_msg_id, text):
         cached_all = state.get("cached_all_rates")
         cached_key = state.get("cached_pair_key")
         ts = state.get("forecast_ts")
-        
+
         now_ts = int(time.time())
         pair_key = f"{second}_per_{first}"
-        
+
         use_cached = False
         if cached_all and cached_key and ts:
             if cached_key == pair_key and (now_ts - int(ts)) <= CACHE_TTL:
@@ -855,11 +984,11 @@ def _background_question_logic(bot, chat_id, bot_msg_id, text):
         all_rates = cached_all
     else:
         all_rates = fetch_sequences_all_pairs(CURRENCIES, days=max(MODELS_SETTINGS["reg"]["max_n"], MODELS_SETTINGS["markov"]["max_n"]))
-        
+
     dates = sorted(all_rates.keys())
     prices = [float(all_rates[d][pair_key]) for d in dates]
     last_prices_text = ", ".join(f"{p:.6f}" for p in (prices[-3:] if prices else []))
-    
+
     with _get_chat_lock(chat_id):
         state = _get_chat_state(chat_id)
         forecasted_prices = state.get("forecasted_prices")
@@ -874,7 +1003,7 @@ def _background_question_logic(bot, chat_id, bot_msg_id, text):
             a = item.get("a", "")
             parts.append(f"Q{i+1}: {q}\nA{i+1}: {a}")
         history_text = "\n".join(parts) + "\n"
-        
+
     if forecasted_prices:
         forecast_text = ", ".join(f"{p:.6f}" for p in forecasted_prices)
         if forecast_delta is not None:
@@ -892,10 +1021,10 @@ def _background_question_logic(bot, chat_id, bot_msg_id, text):
         )
     else:
         summary_text = f"{history_text}Pair: {first}/{second}\nLatest prices: {last_prices_text}\nForecast days: {days}\n"
-        
+
     gemini_resp = call_gemini_advice(text, summary_text)
     final_caption = gemini_resp if gemini_resp else "Ассистент не смог предоставить ответ (ошибка подключения к модели)."
-    
+
     with _get_chat_lock(chat_id):
         state = _get_chat_state(chat_id)
         qa_history = state.get("qa_history", [])
@@ -904,13 +1033,13 @@ def _background_question_logic(bot, chat_id, bot_msg_id, text):
         state["qa_history"] = qa_history
         state["asked_count"] = state.get("asked_count", 0) + 1
         CHAT_STATE[chat_id] = state
-        
+
         media_format_pred = state.get("media_format_at_prediction") or state.get("media_format")
         if media_format_pred == "gif":
-            media_path = state.get("last_media_gif_pred") or state.get("last_media_gif") or state.get("last_media_png")
-            is_gif = bool(state.get("last_media_gif_pred") or state.get("last_media_gif"))
+            media_path = state.get("last_media_gif_pred_file_id") or state.get("last_media_gif_file_id") or state.get("last_media_gif") or state.get("last_media_png")
+            is_gif = bool(state.get("last_media_gif_pred_file_id") or state.get("last_media_gif_file_id") or state.get("last_media_gif"))
         else:
-            media_path = state.get("last_media_png_pred") or state.get("last_media_png") or state.get("last_media_gif")
+            media_path = state.get("last_media_png_pred_file_id") or state.get("last_media_png_file_id") or state.get("last_media_png") or state.get("last_media_gif")
             is_gif = False
 
         kb_state = state.copy()
@@ -941,7 +1070,7 @@ def question_message_handler(update, context):
     chat_id = msg.chat.id
     user_msg_id = msg.message_id
     text = (msg.text or "").strip()
-    
+
     try:
         context.bot.delete_message(chat_id=chat_id, message_id=user_msg_id)
     except Exception:
@@ -949,7 +1078,7 @@ def question_message_handler(update, context):
 
     if not text:
         return
-        
+
     try:
         with _get_chat_lock(chat_id):
             state = _get_chat_state(chat_id)
@@ -962,9 +1091,9 @@ def question_message_handler(update, context):
             state.setdefault("asked_count", 0)
             state.setdefault("asked_count_at_prediction", state.get("asked_count", 0))
             CHAT_STATE[chat_id] = state
-        
+
         bot_msg_id = state.get("msg_id")
-        
+
         _send_replace_media(context.bot, chat_id, bot_msg_id, AI_THINKING_PATH, is_gif=False, caption=user_interface["captions"]["awaiting_assistant"], reply_markup=None)
 
         if not _submit_background(context.bot, chat_id, bot_msg_id, _background_question_logic, context.bot, chat_id, bot_msg_id, text):
@@ -978,7 +1107,7 @@ def question_message_handler(update, context):
 def telegram_main(config: dict):
     global TELEGRAM_TOKEN, TEMP_FOLDER, LOGO_PATH, MODELS_PATH, MODELS_SETTINGS, CURRENCIES, user_interface, CACHE_TTL, GEMINI_API_KEY, GEMINI_MODEL, GEMINI_URL, PROMPT_TEMPLATE, ASK_IMG_PATH, AI_THINKING_PATH, PREDICTING_PATH
     global EXECUTOR
-    
+
     TELEGRAM_TOKEN = config.get("TELEGRAM_TOKEN")
     TEMP_FOLDER = config.get("TEMP_FOLDER")
     LOGO_PATH = config.get("LOGO_PATH")
@@ -993,7 +1122,7 @@ def telegram_main(config: dict):
     GEMINI_API_KEY = config.get("GEMINI_API_KEY")
     GEMINI_MODEL = config.get("GEMINI_MODEL")
     PROMPT_TEMPLATE = config.get("PROMPT_TEMPLATE")
-    
+
     if GEMINI_MODEL:
         GEMINI_URL = f"https://generativelanguage.googleapis.com/v1beta/models/{GEMINI_MODEL}:generateContent"
     if TEMP_FOLDER and os.path.isdir(TEMP_FOLDER):
@@ -1004,7 +1133,7 @@ def telegram_main(config: dict):
                     os.remove(p)
                 except Exception:
                     logger.exception("telegram_main: failed to clear temp folder file %s", p)
-    
+
     EXECUTOR = ThreadPoolExecutor(max_workers=os.cpu_count())
 
     req = Request(con_pool_size=HTTP_POOL_SIZE, connect_timeout=30, read_timeout=30)
@@ -1014,7 +1143,7 @@ def telegram_main(config: dict):
     dp.add_handler(CommandHandler("start", start_handler))
     dp.add_handler(CallbackQueryHandler(cb_query))
     dp.add_handler(MessageHandler(Filters.text & (~Filters.command), question_message_handler))
-    
+
     updater.start_polling()
     try:
         updater.idle()
