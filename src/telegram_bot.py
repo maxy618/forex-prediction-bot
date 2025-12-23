@@ -567,7 +567,16 @@ def _perform_prediction_and_edit(bot, chat_id, message_id, user_id, first, secon
     for i in range(1, len(prices)):
         diffs.append(prices[i] - prices[i - 1])
     signs = ["+" if d >= 0 else "-" for d in diffs]
-    old_prices = prices[-3:] if len(prices) >= 3 else prices[:]
+    
+    seen = set()
+    unique_indices = []
+    for i in range(len(prices)-1, -1, -1):
+        if prices[i] not in seen:
+            seen.add(prices[i])
+            unique_indices.append(i)
+        if len(unique_indices) >= 3:
+            break
+    old_prices = [prices[i] for i in sorted(unique_indices)] if unique_indices else prices[-3:]
 
     if not old_prices:
         raise ValueError("Not enough data to plot")
