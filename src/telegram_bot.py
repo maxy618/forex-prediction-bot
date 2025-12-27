@@ -21,7 +21,7 @@ from telegram.utils.request import Request
 
 from parser import SESSION, HTTP_POOL_SIZE, fetch_sequences_all_pairs
 from plotter import plot_sequence, make_forecast_gif
-from model_engine import load_model, forecast_diffs, forecast_signs
+from model_engine import load_cached_data, find_knn_forecast
 
 
 TELEGRAM_TOKEN = None
@@ -40,8 +40,10 @@ GEMINI_MODEL = None
 GEMINI_URL = None
 PROMPT_TEMPLATE = None
 
+
 CHAT_STATE = {}
 CHAT_LOCKS = {}
+
 
 EXECUTOR = None
 
@@ -543,10 +545,12 @@ def _clear_chat_media_and_cache(chat_id):
 
 def _perform_prediction_and_edit(bot, chat_id, message_id, user_id, first, second, days):
     _clear_chat_media_and_cache(chat_id)
-    try:
-        needed_days = max(MODELS_SETTINGS["reg"]["max_n"], MODELS_SETTINGS["markov"]["max_n"])
-    except Exception:
-        needed_days = days if days > 0 else 10
+    
+    knn_settings = MODELS_SETTINGS.get("knn", {})
+    window_size = knn_settings.get("window_size", 14)
+    k_neighbors = knn_settings.get("k", 10)
+    
+    needed_days = window_size + 5
 
     all_rates = fetch_sequences_all_pairs(CURRENCIES, days=needed_days)
 
@@ -562,56 +566,31 @@ def _perform_prediction_and_edit(bot, chat_id, message_id, user_id, first, secon
 
     if not prices:
         raise ValueError("Prices list is empty after fetch")
+    
+    if len(prices) < 2:
+        raise ValueError("Not enough price data for diff calculation")
 
-    diffs = [0.0]
+    diffs = []
     for i in range(1, len(prices)):
         diffs.append(prices[i] - prices[i - 1])
-    signs = ["+" if d >= 0 else "-" for d in diffs]
     
-    seen = set()
-    unique_indices = []
-    for i in range(len(prices)-1, -1, -1):
-        if prices[i] not in seen:
-            seen.add(prices[i])
-            unique_indices.append(i)
-        if len(unique_indices) >= 3:
-            break
-    old_prices = [prices[i] for i in sorted(unique_indices)] if unique_indices else prices[-3:]
-
-    if not old_prices:
-        raise ValueError("Not enough data to plot")
-
+    model_path = os.path.join(MODELS_PATH, f"knn_data_{first}{second}.pkl")
+    if not os.path.exists(model_path):
+        raise FileNotFoundError(f"Model data for {first}{second} not found")
+        
+    history_diffs = load_cached_data(model_path)
+    
+    current_sequence = diffs[-window_size:] if len(diffs) >= window_size else diffs
+    
+    forecasted_diffs = find_knn_forecast(history_diffs, current_sequence, k=k_neighbors, horizon=days)
+    
+    old_prices = prices[-3:] if len(prices) >= 3 else prices
     last_price = old_prices[-1]
-    reg_models = []
-    markov_models = []
-    for n in range(3, 11):
-        p = os.path.join(MODELS_PATH, f"regression_{first}{second}_{n}.pkl")
-        if os.path.exists(p):
-            reg_models.append(load_model(p))
-        p2 = os.path.join(MODELS_PATH, f"markov_{first}{second}_{n}.pkl")
-        if os.path.exists(p2):
-            markov_models.append(load_model(p2))
-
-    max_nlags = max([len(c) - 1 for c in reg_models]) if reg_models else 1
-    max_nlags = min(max_nlags, len(diffs))
-    last_diffs = diffs[-max_nlags:] if len(diffs) >= max_nlags else diffs[:]
-
-    forecasted_diffs = forecast_diffs(last_diffs, reg_models, days) if reg_models else [0.0] * days
-    forecasted_signs = forecast_signs(signs, markov_models, days) if markov_models else [None] * days
-
-    adjusted = []
-    for d, s in zip(forecasted_diffs, forecasted_signs):
-        if s == "-":
-            adjusted.append(-abs(d))
-        elif s == "+":
-            adjusted.append(abs(d))
-        else:
-            adjusted.append(d)
-
-    cur = last_price
+    
     new_prices = []
-    for d in adjusted:
-        cur = cur + d
+    cur = last_price
+    for d in forecasted_diffs:
+        cur += d
         new_prices.append(cur)
 
     png_path = _temp_file(user_id, ext="png")
@@ -667,7 +646,7 @@ def _perform_prediction_and_edit(bot, chat_id, message_id, user_id, first, secon
                     "days": days,
                     "awaiting_question": False,
                     "forecasted_prices": [float(x) for x in new_prices],
-                    "forecasted_diffs": [float(x) for x in adjusted],
+                    "forecasted_diffs": [float(x) for x in forecasted_diffs],
                     "forecast_delta": float(delta),
                     "advice_text": caption,
                     "forecast_ts": int(time.time()),
@@ -980,6 +959,9 @@ def _background_question_logic(bot, chat_id, bot_msg_id, text):
         cached_all = state.get("cached_all_rates")
         cached_key = state.get("cached_pair_key")
         ts = state.get("forecast_ts")
+        
+        knn_settings = MODELS_SETTINGS.get("knn", {})
+        window_size = knn_settings.get("window_size", 14)
 
         now_ts = int(time.time())
         pair_key = f"{second}_per_{first}"
@@ -992,7 +974,7 @@ def _background_question_logic(bot, chat_id, bot_msg_id, text):
     if use_cached:
         all_rates = cached_all
     else:
-        all_rates = fetch_sequences_all_pairs(CURRENCIES, days=max(MODELS_SETTINGS["reg"]["max_n"], MODELS_SETTINGS["markov"]["max_n"]))
+        all_rates = fetch_sequences_all_pairs(CURRENCIES, days=window_size + 5)
 
     dates = sorted(all_rates.keys())
     prices = [float(all_rates[d][pair_key]) for d in dates]

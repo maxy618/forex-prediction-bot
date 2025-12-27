@@ -123,4 +123,3 @@ def make_forecast_gif(old_prices, new_prices, gif_path):
         format="GIF"
     )
     return gif_path
-

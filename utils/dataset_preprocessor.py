@@ -24,7 +24,6 @@ quant_diff  = Decimal('1').scaleb(-DIFF_PREC)
 
 with open(INPUT, newline='', encoding='utf-8') as f:
     reader = csv.DictReader(f)
-    header = reader.fieldnames
     rows = [row for row in reader]
 
 
@@ -76,16 +75,15 @@ for pair in pairs:
     out_filename = f"../datasets/{pair}.csv"
     with open(out_filename, "w", newline='', encoding='utf-8') as outf:
         writer = csv.writer(outf)
-        writer.writerow(["Date", "Price", "Sign", "Difference"])
+        writer.writerow(["Date", "Price", "Difference"])
         for i in range(1, len(out_rows)):
             date_cur, price_cur = out_rows[i]
             _, price_prev = out_rows[i - 1]
-            sign = "+" if price_cur > price_prev else "-"
-            diff = abs(price_cur - price_prev)
+            diff = price_cur - price_prev
 
             price_fmt = format(price_cur.quantize(quant_price), 'f')
             diff_fmt  = format(diff.quantize(quant_diff), 'f')
 
-            writer.writerow([date_cur, price_fmt, sign, diff_fmt])
+            writer.writerow([date_cur, price_fmt, diff_fmt])
 
     print(f"Created {out_filename} ({len(out_rows)-1} rows).")
