@@ -611,7 +611,7 @@ def _perform_prediction_and_edit(bot, chat_id, message_id, user_id, first, secon
     verb = "стоит" if delta > 0 else "не стоит"
     advice = f"Скорее всего {verb} покупать"
     caption = (
-        f"{first}/{second} → {last_price:.6f}\n"
+        f"{first}/{second} → {new_prices[-1]:.6f}\n"
         f"{color_emoji} Прогноз: {trend}\n"
         f"{arrow} {delta_percent:+.2f}% за {days} дн. ({delta:+.6f})\n{advice}\n\n"
         f"Данные на {date.today().strftime('%d.%m.%Y')}"
