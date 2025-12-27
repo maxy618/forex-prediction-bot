@@ -13,8 +13,7 @@ def load_cached_data(path_to_model):
     if not os.path.exists(path_to_model):
         raise FileNotFoundError(f"{path_to_model} does not exist")
     with open(path_to_model, 'rb') as file:
-        model = pickle.load(file)
-        return model
+        return pickle.load(file)
 
 
 def find_knn_forecast(history_diffs, query_sequence, k=5, horizon=1):
@@ -28,7 +27,6 @@ def find_knn_forecast(history_diffs, query_sequence, k=5, horizon=1):
         return [0.0] * horizon
 
     distances = []
-    
     limit = data_len - seq_len - horizon + 1
     
     for i in range(limit):

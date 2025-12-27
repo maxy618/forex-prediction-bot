@@ -27,7 +27,6 @@ BASE_ARCHIVE = "https://www.cbr-xml-daily.ru/archive"
 def get_dates_list(num_days):
     today = date.today()
     start = today - timedelta(days=num_days-1)
-
     day = start
     res = []
     while day <= today:
@@ -38,42 +37,25 @@ def get_dates_list(num_days):
 
 def fetch_for_date(d, base_latest=BASE_LATEST, base_archive=BASE_ARCHIVE):
     if d == date.today():
-        url = base_latest
+        urls = [base_latest]
     else:
-        url = f"{base_archive}/{d.year}/{d.month:02d}/{d.day:02d}/daily_json.js"
-    try:
-        r = SESSION.get(url, timeout=6)
-        if r.status_code == 200:
-            try:
-                return r.json()
-            except ValueError:
-                pass
-    except Exception:
-        pass
+        urls = [
+            f"{base_archive}/{d.year}/{d.month:02d}/{d.day:02d}/daily_json.js",
+            base_latest
+        ]
 
-    # retry once
-    try:
-        time.sleep(0.2)
-        r = SESSION.get(url, timeout=6)
-        if r.status_code == 200:
+    for url in urls:
+        for _ in range(2):
             try:
-                return r.json()
-            except ValueError:
+                r = SESSION.get(url, timeout=6)
+                if r.status_code == 200:
+                    try:
+                        return r.json()
+                    except ValueError:
+                        pass
+            except Exception:
                 pass
-    except Exception:
-        pass
-
-    # fallback
-    if url != base_latest:
-        try:
-            r = SESSION.get(base_latest, timeout=6)
-            if r.status_code == 200:
-                try:
-                    return r.json()
-                except ValueError:
-                    pass
-        except Exception:
-            pass
+            time.sleep(0.2)
     return None
 
 
@@ -97,10 +79,6 @@ def fetch_sequences_all_pairs(currencies, days=10):
     res = {}
     for d in dates:
         js = fetch_for_date(d)
-        if js is None:
-            time.sleep(0.2)
-            js = fetch_for_date(d)
-
         if js is not None:
             for c in currencies:
                 val = rub_per_one_from_json(js, c)

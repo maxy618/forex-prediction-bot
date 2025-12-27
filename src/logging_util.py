@@ -8,25 +8,21 @@ from logging.handlers import TimedRotatingFileHandler
 def _make_logs_dir():
     base = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "logs"))
     os.makedirs(base, exist_ok=True)
-    logging.debug("_make_logs_dir returning %s", base)
     return base
 
 
 def setup_logging(level=logging.INFO, name=None):
-    LEVELS = {
+    levels = {
         "DEBUG": logging.DEBUG,
         "INFO": logging.INFO,
         "WARNING": logging.WARNING,
         "ERROR": logging.ERROR,
         "CRITICAL": logging.CRITICAL,
     }
-
-    logging.debug("setup_logging called level=%s name=%s", level, name)
     if isinstance(level, str):
-        level = LEVELS.get(level.upper(), logging.INFO)
+        level = levels.get(level.upper(), logging.INFO)
 
     logs_dir = _make_logs_dir()
-
     date_str = datetime.now().strftime("%Y%m%d")
     log_path = os.path.join(logs_dir, f"{date_str}.log")
 
@@ -54,14 +50,11 @@ def setup_logging(level=logging.INFO, name=None):
         logger.addHandler(fh)
         logger.addHandler(ch)
 
-    logger.debug("Logging initialized, file=%s", log_path)
     return logger
 
 
 def make_rid():
-    rid = uuid.uuid4().hex[:8]
-    logging.debug("make_rid -> %s", rid)
-    return rid
+    return uuid.uuid4().hex[:8]
 
 
 def exception_rid(logger, message=None, exc=None):

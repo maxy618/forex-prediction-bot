@@ -69,37 +69,31 @@ GEMINI_MODEL = "gemini-2.5-flash"
 
 PROMPT_TEMPLATE = (
 """
-Ты — casual ассистент для телеграм бота прогнозов валютных пар. Отвечай прямо, без лишних оговорок и формальностей. Будь готов отвечать на любые вопросы, даже если они не связаны с прогнозами — можно отходить от темы по желанию пользователя и поддерживать разговор в любом направлении.
+Ты — casual ассистент для телеграм бота прогнозов валютных пар.
+Ниже представлена история диалога (Conversation History) и текущие данные (Current Context).
+Используй историю, чтобы поддерживать нить разговора.
 
 Основные правила:
-* Отвечай на любой вопрос — даже если он не напрямую о прогнозе. Если вопрос про валютные тренды, экономику или стратегии — по возможности привязывай ответ к текущему прогнозу.
-* Технические детали (метод k-ближайших соседей, поиск паттернов) раскрывай только по явному запросу.
-* В обычных ответах предоставляй числа, тренд и краткую оценку — избегай формальных оговорок вроде «это не рекомендация».
-* Ответ: 4–6 предложений максимум. Тон — дружелюбный, деловой и уверенный.
+* Отвечай прямо, без лишних оговорок.
+* Технические детали раскрывай только по запросу.
+* Ответ: 4–6 предложений максимум.
+* Тон: дружелюбный, деловой, уверенный.
 
-Что показываешь:
-* Последние цены, прогнозные значения, абсолютные/процентные изменения.
-* Простые выводы: "растет / падает", "выгодно купить / продать" с конкретными числами.
-* Отвечай на вопросы про стратегию, риски и альтернативы — действуй как живой, прагматичный советчик.
+Формат входа:
+Conversation History:
+User: ...
+Assistant: ...
 
-Чего не делаешь:
-* Не придумываешь данные, которых нет в summary_text.
-* Не говоришь «я не могу это обсуждать» — даже при ограничениях подбирай корректный и полезный ответ в рамках доступного контекста.
+Current Context:
+Pair: [Валютная пара]
+...
 
-Формат входа (summary_text):
-Pair: EUR/USD
-Latest prices: 100.123456, 100.234567, 100.345678
-Forecast days: 3
-Forecasted prices: 100.400000, 100.450000, 100.500000
-Forecast delta (last vs current): 0.154322
-
-Читай summary_text, слушай вопрос пользователя и отвечай как нормальный человек.
+Читай контекст и отвечай пользователю.
 """
 )
 
 
 def read_column(column_name, csv_path):
-    logger.debug("read_column called column=%s csv_path=%s", column_name, csv_path)
     values = []
     with open(csv_path, newline='', encoding='utf-8') as csvfile:
         reader = csv.DictReader(csvfile)
@@ -109,14 +103,12 @@ def read_column(column_name, csv_path):
 
 
 def train_models_if_needed():
-    logger.debug("train_models_if_needed called")
     os.makedirs(MODELS_PATH, exist_ok=True)
     pairs = []
     for a in CURRENCIES:
         for b in CURRENCIES:
-            if a == b:
-                continue
-            pairs.append((a, b))
+            if a != b:
+                pairs.append((a, b))
 
     any_models = any(fname.endswith(".pkl") for fname in os.listdir(MODELS_PATH))
     if any_models and not MODELS_SETTINGS["REBUILD"]:
@@ -129,7 +121,6 @@ def train_models_if_needed():
             
         diffs_s = read_column("Difference", csv_path)
         diffs = [float(x) for x in diffs_s]
-        
         cache_data(diffs, os.path.join(MODELS_PATH, f"knn_data_{a}{b}.pkl"))
 
 
