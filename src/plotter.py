@@ -52,6 +52,9 @@ def render_plot_image(old_prices, new_prices):
     ax.tick_params(colors="white", labelsize=8)
     plt.ylim(y_min, y_max)
 
+    if new_prices:
+        plt.axhline(y=new_prices[-1], color="white", linestyle="--", linewidth=1, alpha=0.5)
+
     plt.plot(list(range(m)), old_prices, color="white", linewidth=2)
     if n > 0:
         plt.plot(list(range(m-1, total)), [old_prices[-1]] + new_prices, color=color_new, linewidth=2)
