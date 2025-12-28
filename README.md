@@ -3,7 +3,7 @@
 ![Python Version](https://img.shields.io/badge/python-3.9%2B-blue)
 ![License](https://img.shields.io/badge/license-MIT-green)
 ![Status](https://img.shields.io/badge/status-active-success)
-![AI Powered](https://img.shields.io/badge/AI-Gemini%20Pro-orange)
+![AI Powered](https://img.shields.io/badge/AI-Gemini%20Flash-blue)
 
 A sophisticated Telegram bot designed to forecast currency exchange rates using a **hybrid machine learning ensemble**. By combining **Linear Regression** for quantitative magnitude prediction and **Markov Chains** for directional trend analysis, this bot provides daily forecasts for major currency pairs (USD, EUR, GBP, etc.) against the Russian Ruble (RUB).
 
