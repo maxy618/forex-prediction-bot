@@ -1,75 +1,105 @@
-# 📈 Forex Prediction Telegram Bot
+# 📈 Forex Prediction Telegram Bot (KNN & AI-Powered)
 
 ![Python Version](https://img.shields.io/badge/python-3.9%2B-blue)
 ![License](https://img.shields.io/badge/license-MIT-green)
 ![Status](https://img.shields.io/badge/status-active-success)
-![AI Powered](https://img.shields.io/badge/AI-Gemini%20Flash-blue)
+![AI Powered](https://img.shields.io/badge/AI-Google%20Gemini-magenta)
+![Algorithm](https://img.shields.io/badge/Algorithm-k--NN-orange)
 
-A sophisticated Telegram bot designed to forecast currency exchange rates using a **hybrid machine learning ensemble**. By combining **Linear Regression** for quantitative magnitude prediction and **Markov Chains** for directional trend analysis, this bot provides daily forecasts for major currency pairs (USD, EUR, GBP, etc.) against the Russian Ruble (RUB).
+A sophisticated, asynchronous Telegram bot designed to forecast currency exchange rates using **Pattern Recognition (k-Nearest Neighbors)**. Unlike simple linear regression models, this bot analyzes historical price sequences to find similar market patterns from the past and projects them into the future.
 
-It features real-time data fetching from the Central Bank of Russia (CBR), generates high-quality visualizations (static charts and animated GIFs), and integrates **Google's Gemini AI** to provide natural language financial insights based on the technical data.
+It features a robust multi-threaded architecture, generates high-quality **animated GIFs** with motion trails, and integrates **Google's Gemini 2.5 Flash** to act as a context-aware financial assistant.
 
 ---
 
 ## 📑 Table of Contents
 - [✨ Key Features](#-key-features)
-- [🧠 Technical Architecture](#-technical-architecture)
-  - [The Hybrid Model](#the-hybrid-model)
-  - [Data Flow](#data-flow)
+- [🧠 The Science: How It Works](#-the-science-how-it-works)
+  - [The Algorithm (k-NN)](#the-algorithm-k-nn)
+  - [Cross-Rate Calculation](#cross-rate-calculation)
+- [🤖 AI Integration (Gemini)](#-ai-integration-gemini)
+- [🏗️ Technical Architecture](#%EF%B8%8F-technical-architecture)
+  - [Concurrency Model](#concurrency-model)
+  - [Visual Rendering Engine](#visual-rendering-engine)
 - [📂 Project Structure](#-project-structure)
 - [🚀 Installation & Setup](#-installation--setup)
 - [⚙️ Configuration](#%EF%B8%8F-configuration)
-- [🖥️ Usage](#%EF%B8%8F-usage)
-- [🛠️ Modules Breakdown](#%EF%B8%8F-modules-breakdown)
+- [🖥️ Usage Guide](#%EF%B8%8F-usage-guide)
+- [🐛 Logging & Troubleshooting](#-logging--troubleshooting)
 - [⚠️ Disclaimer](#%EF%B8%8F-disclaimer)
-- [📄 License](#-license)
 
 ---
 
 ## ✨ Key Features
 
-*   **Hybrid ML Engine**: unique combination of deterministic (Linear Regression) and probabilistic (Markov Chains) models to improve forecast accuracy.
-*   **Smart Trend Analysis**: Uses a configurable **Temperature** parameter to control the stochastic nature of the Markov Chain predictions (balancing between conservative and volatile trends).
-*   **Rich Visualizations**:
-    *   **Static Plots**: High-resolution PNGs showing historical data vs. predicted trends.
-    *   **Animated GIFs**: Dynamic visualizations showing the transition from history to forecast.
-*   **AI Financial Analyst**: Integrated **Google Gemini API** allows users to ask questions about the forecast (e.g., *"Why is the trend going down?"*) and receive AI-generated explanations.
-*   **Automated Data Pipeline**:
-    *   Fetches daily official rates from the CBR API.
-    *   Automatically updates historical datasets (`.csv`).
-    *   Retrains models on-the-fly if data is updated.
-*   **Robust Logging**: Daily rotating logs to monitor bot health and user interactions.
+*   **Pattern-Based Forecasting**: Uses a **k-Nearest Neighbors (k-NN)** approach to identify historical market situations similar to the current trend.
+*   **Multi-Currency Support**: Supports major pairs including **USD, EUR, JPY, GBP, CHF, and RUB**. Automatically calculates cross-rates (e.g., GBP/JPY) even if the source provides only rates against RUB.
+*   **Dynamic Visualizations**:
+    *   **Animated GIFs**: Smooth transitions showing the path from history to forecast with "motion trails" for visual impact.
+    *   **Static PNGs**: High-contrast charts for quick loading.
+    *   **Toggle Feature**: Users can switch between GIF and PNG formats on the fly.
+*   **AI Financial Analyst**: Integrated **Google Gemini API** allows users to ask natural language questions. The AI receives the exact numerical context (forecast delta, volatility, history) to provide grounded answers.
+*   **Resilient Data Pipeline**:
+    *   Fetches data from the Central Bank of Russia (CBR) with automatic retries and connection pooling.
+    *   Caches historical datasets to minimize API load.
+    *   Interpolates missing data points (weekends/holidays).
+*   **Asynchronous UI**: Uses a `ThreadPoolExecutor` to handle heavy plotting and network tasks in the background, ensuring the Telegram bot UI never freezes.
 
 ---
 
-## 🧠 Technical Architecture
+## 🧠 The Science: How It Works
 
-### The Hybrid Model
-The core of this project relies on an ensemble approach to solve the two main problems of time-series forecasting: **Magnitude** (How much will it change?) and **Direction** (Will it go up or down?).
+### The Algorithm (k-NN)
+Instead of trying to fit a straight line (Linear Regression) or guess up/down probabilities (Markov Chains), this bot uses **Non-Parametric Pattern Matching**.
 
-1.  **Linear Regression (The Magnitude):**
-    *   Uses the Least Squares method to fit a linear trend to the recent historical data.
-    *   Responsible for predicting the *numerical difference* (delta) between days.
-    *   *Library:* `numpy` (Matrix operations).
+1.  **Window Slicing**: The bot takes the most recent sequence of price changes (e.g., the last 21 days). This is the "Query Sequence".
+2.  **History Search**: It scans the entire available history of that currency pair.
+3.  **Euclidean Distance**: It calculates the mathematical distance between the "Query Sequence" and every possible window in the past.
+    $$ d(p, q) = \sqrt{\sum (q_i - p_i)^2} $$
+4.  **Neighbor Selection**: It selects the **$k$** (default: 30) closest historical matches (sequences that looked exactly like today's market).
+5.  **Projection**: It looks at what happened *immediately after* those historical sequences.
+6.  **Averaging**: The forecast is the average of those future outcomes.
 
-2.  **Markov Chains (The Direction):**
-    *   Constructs a transition matrix based on historical "signs" (Did the price go up `+` or down `-`?).
-    *   Calculates the probability of the next day's sign based on the previous sequence (Order $k$).
-    *   **Temperature Scaling**: A hyperparameter $T$ is applied to the probability distribution.
-        *   $T < 1$: Makes the model "conservative" (favors the most likely outcome).
-        *   $T = 1$: Standard probability.
-        *   $T > 1$: Increases randomness (allows for "black swan" events).
+*This approach effectively says: "The last time the market moved exactly like this, here is what happened next on average."*
 
-### Data Flow
-1.  **User Request**: User selects a currency pair (e.g., USD/RUB) via Telegram.
-2.  **Data Fetching**: `parser.py` requests the latest JSON data from CBR.
-3.  **Preprocessing**: Data is cleaned, and missing days are interpolated.
-4.  **Inference**:
-    *   `model_engine.py` loads the trained `.pkl` models.
-    *   Generates a prediction for $N$ days ahead.
-5.  **Visualization**: `plotter.py` draws the graph and saves it to `temp/`.
-6.  **Response**: The bot sends the image/GIF to the user.
-7.  **AI Context**: If the user asks a question, the numerical data is sent to Gemini to generate a text explanation.
+### Cross-Rate Calculation
+The data source (`cbr-xml-daily.ru`) provides rates relative to the Russian Ruble (RUB). To get a pair like **GBP/USD**, the bot performs synthetic cross-rate calculation:
+
+$$ Rate_{GBP/USD} = \frac{Rate_{GBP/RUB}}{Rate_{USD/RUB}} $$
+
+This allows prediction for any combination of supported currencies.
+
+---
+
+## 🤖 AI Integration (Gemini)
+
+The bot uses the `google-generativeai` library to connect to the **Gemini 2.5 Flash** model.
+
+**Context Injection:**
+When a user asks a question (e.g., *"Should I buy now?"*), the bot doesn't just send the question. It constructs a rich prompt containing:
+1.  **Conversation History**: The last 5 Q&A pairs to maintain context.
+2.  **Current Data**: The specific currency pair, the current price, the forecasted price, and the calculated delta.
+3.  **System Persona**: Instructions to act as a "Casual Financial Assistant."
+
+This ensures the AI doesn't hallucinate random numbers but interprets the *actual* chart data generated by the k-NN model.
+
+---
+
+## 🏗️ Technical Architecture
+
+### Concurrency Model
+The bot is built on `python-telegram-bot` (synchronous mode wrapped in threads).
+*   **Main Thread**: Handles Telegram updates (button clicks, commands).
+*   **Worker Threads**: A `ThreadPoolExecutor` handles CPU-bound tasks (generating GIFs with Pillow) and I/O-bound tasks (fetching JSON from CBR).
+*   **Locking**: Per-chat locks (`threading.RLock`) ensure that a user cannot spam buttons and corrupt their session state while a forecast is generating.
+
+### Visual Rendering Engine
+Located in `src/plotter.py`:
+*   **Matplotlib**: Draws the base vector lines for history (white) and forecast (green/red).
+*   **Pillow (PIL)**:
+    *   Converts Matplotlib buffers to images.
+    *   **Interpolation**: Generates intermediate frames between data points for fluid animation.
+    *   **Motion Trails**: Adds a fading "ghost" effect to the leading edge of the animation line.
 
 ---
 
@@ -77,24 +107,26 @@ The core of this project relies on an ensemble approach to solve the two main pr
 
 ```bash
 forex-prediction-bot/
-├── assets/              # Static assets (logos, loading icons)
-├── datasets/            # Historical data (CSV files for training)
-│   ├── USD.csv
-│   └── EUR.csv
-├── logs/                # Rotating log files
-├── models/              # Serialized trained models (.pkl)
-├── src/                 # Source code
-│   ├── main.py          # Entry point for the application
-│   ├── parser.py        # CBR API interaction and data cleaning
-│   ├── model_engine.py  # Linear Regression & Markov Chain logic
-│   ├── plotter.py       # Matplotlib visualization logic
-│   └── telegram_bot.py  # Telegram API handlers and UI
-├── utils/               # Utility scripts
-│   └── logging_util.py  # Logger configuration
-├── .env                 # Environment variables (API Keys)
-├── .gitignore
-├── requirements.txt     # Python dependencies
-└── README.md            # Documentation
+├── assets/                  # Static images (logos, loading states)
+├── datasets/                # CSV files (if used for pre-training/caching)
+├── logs/                    # Daily rotating logs
+├── models/                  # Serialized .pkl files (cached k-NN vectors)
+├── temp/                    # Temporary storage for generated GIFs/PNGs
+├── src/
+│   ├── main.py              # Configuration & Entry point
+│   ├── telegram_bot.py      # Telegram handlers, UI logic, Threading
+│   ├── model_engine.py      # k-NN logic, caching, math operations
+│   ├── parser.py            # CBR API client, JSON parsing, retries
+│   ├── plotter.py           # Matplotlib & Pillow animation logic
+│   ├── logging_util.py      # Logger setup & error tracking
+│   └── telegram_utils/      # Helper modules
+│       ├── keyboards.py     # Inline keyboard generators
+│       ├── state.py         # In-memory session management
+│       ├── media_sender.py  # Logic to send/edit/replace photos
+│       └── llm_client.py    # Gemini API wrapper
+├── .env                     # Secrets (API Keys)
+├── requirements.txt         # Dependencies
+└── README.md                # This file
 ```
 
 ---
@@ -102,105 +134,89 @@ forex-prediction-bot/
 ## 🚀 Installation & Setup
 
 ### Prerequisites
-*   Python 3.9 or higher.
-*   A Telegram Bot Token (from [@BotFather](https://t.me/BotFather)).
-*   A Google Gemini API Key (from [Google AI Studio](https://aistudio.google.com/)).
+*   **Python 3.9+**
+*   **Telegram Bot Token**: Get one from [@BotFather](https://t.me/BotFather).
+*   **Google Gemini API Key**: Get one from [Google AI Studio](https://aistudio.google.com/).
 
-### Step-by-Step Guide
+### Step-by-Step
 
 1.  **Clone the Repository**
     ```bash
-    git clone https://github.com/maxy618/forex-prediction-bot.git
+    git clone https://github.com/your-username/forex-prediction-bot.git
     cd forex-prediction-bot
     ```
 
-2.  **Create a Virtual Environment (Recommended)**
+2.  **Create Virtual Environment**
     ```bash
     python -m venv venv
-    # Windows
-    venv\Scripts\activate
-    # macOS/Linux
-    source venv/bin/activate
+    source venv/bin/activate  # Linux/Mac
+    # venv\Scripts\activate   # Windows
     ```
 
 3.  **Install Dependencies**
     ```bash
     pip install -r requirements.txt
     ```
-    *If `requirements.txt` is missing, install manually:*
-    ```bash
-    pip install requests matplotlib Pillow python-telegram-bot python-dotenv numpy google-generativeai
-    ```
 
-4.  **Set Up Environment Variables**
-    Create a `.env` file in the root directory and populate it:
+4.  **Configure Environment**
+    Create a `.env` file in the root directory:
     ```ini
-    # .env file
-    TELEGRAM_TOKEN=123456789:ABCdefGHIjklMNOpqrsTUVwxyz
-    GEMINI_API_KEY=AIzaSyD...
+    TELEGRAM_TOKEN=123456:ABC-DEF1234ghIkl-zyx57W2v1u123ew11
+    GEMINI_API_KEY=AIzaSy...
     CACHE_TTL=300
-    DEBUG_MODE=False
+    HTTP_POOL_SIZE=10
     ```
 
-5.  **Initialize Directories**
-    Ensure the following folders exist (the script usually creates them, but good to be safe):
+5.  **Run the Bot**
     ```bash
-    mkdir -p datasets models logs temp
+    cd src
+    python main.py
     ```
 
 ---
 
 ## ⚙️ Configuration
 
-You can fine-tune the bot's behavior by modifying `src/main.py` or `src/config.py` (if available).
+You can tweak the internal logic in `src/main.py` and `src/model_engine.py`.
 
-| Variable | Location | Description | Default |
-| :--- | :--- | :--- | :--- |
-| `CURRENCIES` | `main.py` | List of supported currency codes (USD, EUR, etc.) | `['USD', 'EUR', 'CNY', ...]` |
-| `TEMPERATURE` | `model_engine.py` | Controls prediction randomness. | `0.3` |
-| `LOOKBACK_DAYS` | `model_engine.py` | How many past days the Linear Reg considers. | `30` |
-| `MARKOV_ORDER` | `model_engine.py` | The depth of the Markov Chain memory. | `5` |
-
----
-
-## 🖥️ Usage
-
-1.  **Start the Bot**
-    ```bash
-    python src/main.py
-    ```
-    *Note: On the first run, the bot may take a few seconds to train the initial models using the CSV data in `datasets/`.*
-
-2.  **Telegram Interaction**
-    *   Open your bot in Telegram.
-    *   Send `/start`.
-    *   **Select Currency**: Choose the base currency (e.g., USD).
-    *   **Select Horizon**: Choose how many days to predict (1-7 days).
-    *   **Analyze**: The bot will reply with a chart.
-    *   **Ask AI**: Click the "Ask AI" button to get a text breakdown of the chart.
+| Variable | Description | Default |
+| :--- | :--- | :--- |
+| `MODELS_SETTINGS["knn"]["k"]` | Number of neighbors to find. Higher = smoother, Lower = more volatile. | `30` |
+| `MODELS_SETTINGS["knn"]["window_size"]` | How many past days to compare against history. | `21` |
+| `HTTP_POOL_SIZE` | Max concurrent connections to the data provider. | `10` |
+| `CACHE_TTL` | Time (seconds) to keep data in memory before re-fetching. | `300` |
 
 ---
 
-## 🛠️ Modules Breakdown
+## 🖥️ Usage Guide
 
-*   **`src/parser.py`**:
-    *   Connects to `cbr.ru` API.
-    *   Parses XML/JSON responses.
-    *   Calculates cross-rates if direct pairs aren't available.
+1.  **Start**: Send `/start`. The bot initializes and shows a disclaimer.
+2.  **Select Currency 1**: Choose the base currency (e.g., USD).
+3.  **Select Currency 2**: Choose the quote currency (e.g., RUB).
+4.  **Select Horizon**: Choose prediction depth (1 to 9 days).
+5.  **Confirm**: The bot processes the data.
+6.  **Result**:
+    *   View the animated chart.
+    *   Read the text summary (Trend direction, percentage change).
+    *   **Buttons**:
+        *   `Ask Question`: Opens a chat mode with Gemini about this specific graph.
+        *   `Show Image/Animation`: Toggles between static PNG and GIF.
+        *   `Back`: Return to currency selection.
 
-*   **`src/model_engine.py`**:
-    *   Contains the `Predictor` class.
-    *   `train()`: Fits the Linear Regression and builds Markov transition matrices.
-    *   `predict()`: Runs the simulation step-by-step for $N$ days.
+---
 
-*   **`src/plotter.py`**:
-    *   Uses `matplotlib.pyplot` to draw the "History" (White) and "Forecast" (Cyan/Magenta).
-    *   Handles the creation of frames for GIF generation using `PIL`.
+## 🐛 Logging & Troubleshooting
 
-*   **`src/telegram_bot.py`**:
-    *   Uses `python-telegram-bot` (async/await).
-    *   Manages `ConversationHandler` states (CHOOSING_CURRENCY, CHOOSING_DAYS).
-    *   Handles callback queries from inline buttons.
+The bot uses a sophisticated logging system (`logging_util.py`).
+
+*   **Logs Location**: `logs/YYYYMMDD.log`
+*   **Error Tracking**: Every exception generates a unique **RID (Request ID)** (e.g., `RID=a1b2c3d4`).
+*   **User Feedback**: If an error occurs, the user sees "Unexpected error (id: a1b2c3d4)". You can grep this ID in the log file to find the exact stack trace.
+
+**Common Issues:**
+*   *Connection Error*: Check `cbr-xml-daily.ru` availability. The bot has built-in retries.
+*   *Gemini Error*: Ensure your API key is valid and has quota.
+*   *Missing Assets*: Ensure the `assets/` folder contains `logo.png`, `ai_thinking.png`, etc.
 
 ---
 
@@ -208,17 +224,10 @@ You can fine-tune the bot's behavior by modifying `src/main.py` or `src/config.p
 
 **This tool is for educational and research purposes only.**
 
-The predictions generated by this bot are based on mathematical models (Linear Regression and Markov Chains) and historical data. Financial markets are influenced by unpredictable real-world events (news, geopolitics) that these models cannot foresee.
+The k-Nearest Neighbors algorithm assumes that history repeats itself, which is not always true in financial markets. This bot does not account for fundamental news, geopolitics, or black swan events.
 *   **Do not use this bot as financial advice.**
 *   **Do not trade real money based solely on these predictions.**
-*   The developers assume no responsibility for financial losses.
 
 ---
 
-## 📄 License
-
-This project is licensed under the **MIT License**. See the [LICENSE](LICENSE) file for details.
-
----
-
-*Created by [maxy618](https://github.com/maxy618)*
+*License: MIT*
